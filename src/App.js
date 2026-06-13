@@ -21,6 +21,24 @@ const DEFAULT_USERS = [
   { id: 16, name: "Оля",                               role: "supervisor", pin: "0015" },
 ];
 
+const DEFAULT_MACHINES = [
+  { id: 1, name: "Самосвал ХОВО Н 020 ЕА (774)" },
+  { id: 2, name: "Самосвал ХОВО О608 ВУ (774)" },
+  { id: 3, name: "Самосвал ХОВО Н495 ХА (174)" },
+  { id: 4, name: "Самосвал ШАКМАН Е324 ВР (774)" },
+  { id: 5, name: "Манипулятор ХОВО Н 576 ЕА (774)" },
+  { id: 6, name: "ДОНГ ФЕНГ К826 НР174" },
+  { id: 7, name: "УРАЛ 10Т. Х444КВ 174" },
+  { id: 8, name: "АВТОКРАН 25Т. Х964ММ174" },
+  { id: 9, name: "АВТОКРАН 16Т. О726УН174" },
+  { id: 10, name: "ПОГРУЗЧИК 6699УС174" },
+  { id: 11, name: "ПОГРУЗЧИК В140 О006УС 74" },
+  { id: 12, name: "МАЗ У302ВТ 774" },
+  { id: 13, name: "ГРЕЙДЕР 0005УС 174" },
+  { id: 14, name: "Манипулятор Е944 МС 174" },
+  { id: 15, name: "УАЗ О599ВУ774" },
+];
+
 const todayStr  = () => new Date().toISOString().slice(0, 10);
 const tomorrowStr = () => { const d = new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); };
 const calcHours = (f, t) => { if (!f||!t) return 0; const [fh,fm]=f.split(":").map(Number),[th,tm]=t.split(":").map(Number),m=(th*60+tm)-(fh*60+fm); return m>0?(m/60).toFixed(1):0; };
@@ -76,10 +94,10 @@ export default function App() {
             requests: val.requests || {},
             tasks: val.tasks || [],
             workTime: val.workTime || {},
-            machines: val.machines || [],
+            machines: val.machines?.length ? val.machines : DEFAULT_MACHINES,
           });
         } else {
-          setData({ users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines:[] });
+          setData({ users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines: DEFAULT_MACHINES });
         }
         setDbConnected(true);
         setLoading(false);
