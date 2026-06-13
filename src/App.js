@@ -4,7 +4,7 @@ const FIREBASE_URL = "https://transport-m5-default-rtdb.firebaseio.com/team_work
 
 const DEFAULT_USERS = [
   { id: 1,  name: "Колдаева Юлия Юрьевна",           role: "manager",    pin: "0000" },
-  { id: 2,  name: "Вафин Данил Закирьянович",          role: "driver",     pin: "0001" },
+  { id: 2,  name: "Вафин Данил Закирьянович",          role: "driver",     pin: "0016" },
   { id: 3,  name: "Касымов Руслан Раилевич",           role: "driver",     pin: "0002" },
   { id: 4,  name: "Мурадымов Марат Хусаинович",        role: "driver",     pin: "0003" },
   { id: 5,  name: "Нафигин Вадим Шавкатович",          role: "driver",     pin: "0004" },
