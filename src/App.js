@@ -135,34 +135,32 @@ export default function App() {
   const dataRef = useRef(data);
   dataRef.current = data;
   const saveTimer = useRef(null);
-  const skipNextPoll = useRef(false);
 
   // Initial load
   useEffect(() => {
     loadData().then(d => { setData(d); setLoaded(true); });
   }, []);
 
-  // Periodic refresh from server (so other devices' changes appear)
+  // Periodic refresh from server (so other devices' changes appear).
+  // Only updates local view — never triggers a save.
   useEffect(() => {
     const id = setInterval(() => {
-      if (skipNextPoll.current) { skipNextPoll.current = false; return; }
       loadData().then(d => setData(d));
     }, 5000);
     return () => clearInterval(id);
   }, []);
 
-  // Debounced save on data change
-  useEffect(() => {
-    if (!loaded) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      skipNextPoll.current = true;
-      saveData(dataRef.current);
-    }, 600);
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [data, loaded]);
-
-  const upd = fn => setData(prev => { const d = JSON.parse(JSON.stringify(prev)); fn(d); return d; });
+  // upd() applies a local change AND schedules a save to the server.
+  const upd = fn => {
+    setData(prev => {
+      const d = JSON.parse(JSON.stringify(prev));
+      fn(d);
+      dataRef.current = d;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => { saveData(dataRef.current); }, 600);
+      return d;
+    });
+  };
 
   const getReqsForDateByEmployee = (empId, date) => {
     const result = [];
