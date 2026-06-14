@@ -62,7 +62,8 @@ async function loadData() {
       headers: SB_HEADERS,
     });
     const json = await res.json();
-    const saved = (json && json[0] && json[0].data) ? json[0].data : {};
+    if (!json || !json[0] || !json[0].data) return null;
+    const saved = json[0].data;
     const blockedMap = saved.blockedUsers || {};
     const users = DEFAULT_USERS.map(u => ({ ...u, blocked: !!blockedMap[u.id] }));
     return {
@@ -74,7 +75,7 @@ async function loadData() {
       salary: saved.salary || {},
     };
   } catch {
-    return blankData();
+    return null;
   }
 }
 
@@ -138,14 +139,14 @@ export default function App() {
 
   // Initial load
   useEffect(() => {
-    loadData().then(d => { setData(d); setLoaded(true); });
+    loadData().then(d => { if (d) setData(d); setLoaded(true); });
   }, []);
 
   // Periodic refresh from server (so other devices' changes appear).
-  // Only updates local view — never triggers a save.
+  // Only updates local view — never triggers a save. Ignores null/failed responses.
   useEffect(() => {
     const id = setInterval(() => {
-      loadData().then(d => setData(d));
+      loadData().then(d => { if (d) setData(d); });
     }, 5000);
     return () => clearInterval(id);
   }, []);
