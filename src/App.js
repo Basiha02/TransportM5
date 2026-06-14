@@ -124,7 +124,7 @@ export default function App() {
         });
       } catch (e) { console.error(e); }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line
   }, [data, dbConnected]);
 
   const upd = fn => setData(prev => { const d = JSON.parse(JSON.stringify(prev)); fn(d); return d; });
