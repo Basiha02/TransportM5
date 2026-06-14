@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 
-const FIREBASE_URL = "https://transport-m5-default-rtdb.firebaseio.com/team_work_app.json";
+const STORAGE_KEY = "team_work_app_m5_new";
 
 const DEFAULT_USERS = [
   { id: 1,  name: "Колдаева Юлия Юрьевна",           role: "manager",    pin: "0000" },
@@ -19,7 +19,7 @@ const DEFAULT_USERS = [
   { id: 14, name: "Салахова Зимфира Маратовна",        role: "supervisor", pin: "0013" },
   { id: 15, name: "Хамматов Фригат",                   role: "driver",     pin: "0014" },
   { id: 16, name: "Оля",                               role: "supervisor", pin: "0015" },
-];
+].map(u => ({ ...u, blocked: false }));
 
 const DEFAULT_MACHINES = [
   { id: 1,  name: "Самосвал ХОВО Н 020 ЕА (774)" },
@@ -39,6 +39,35 @@ const DEFAULT_MACHINES = [
   { id: 15, name: "УАЗ О599ВУ774" },
 ];
 
+function initData() {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    const saved = s ? JSON.parse(s) : {};
+    const blockedMap = saved.blockedUsers || {};
+    const users = DEFAULT_USERS.map(u => ({ ...u, blocked: !!blockedMap[u.id] }));
+    return {
+      users,
+      requests: saved.requests || {},
+      tasks: saved.tasks || [],
+      workTime: saved.workTime || {},
+      machines: DEFAULT_MACHINES,
+      salary: saved.salary || {},
+    };
+  } catch {
+    return { users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines: DEFAULT_MACHINES, salary:{} };
+  }
+}
+
+function saveData(d) {
+  try {
+    const blockedUsers = {};
+    d.users.forEach(u => { if (u.blocked) blockedUsers[u.id] = true; });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      requests: d.requests, tasks: d.tasks, workTime: d.workTime, salary: d.salary || {}, blockedUsers
+    }));
+  } catch {}
+}
+
 const todayStr    = () => new Date().toISOString().slice(0, 10);
 const tomorrowStr = () => { const d = new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); };
 const calcHours   = (f, t) => { if (!f||!t) return 0; const [fh,fm]=f.split(":").map(Number),[th,tm]=t.split(":").map(Number),m=(th*60+tm)-(fh*60+fm); return m>0?(m/60).toFixed(1):0; };
@@ -56,10 +85,7 @@ const S = {
 };
 
 export default function App() {
-  const [data, setData] = useState({ users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines: DEFAULT_MACHINES, salary:{} });
-  const [dbConnected, setDbConnected] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [skipWrite, setSkipWrite] = useState(false);
+  const [data, setData]         = useState(initData);
   const [currentUser, setCurrentUser] = useState(null);
   const [loginName, setLoginName] = useState("");
   const [loginPin,  setLoginPin]  = useState("");
@@ -79,54 +105,7 @@ export default function App() {
   const [eYear,     setEYear]     = useState(new Date().getFullYear());
   const [eMonth,    setEMonth]    = useState(new Date().getMonth()+1);
 
-  // Firebase sync
-  useEffect(() => {
-    let active = true;
-    const fetchData = async () => {
-      try {
-        const res = await fetch(FIREBASE_URL);
-        if (!res.ok) throw new Error("fetch failed");
-        const val = await res.json();
-        if (!active) return;
-        setSkipWrite(true);
-        if (val) {
-          setData({
-            users: DEFAULT_USERS,
-            requests: val.requests || {},
-            tasks: val.tasks || [],
-            workTime: val.workTime || {},
-            machines: val.machines?.length ? val.machines : DEFAULT_MACHINES,
-            salary: val.salary || {},
-          });
-        } else {
-          setData({ users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines: DEFAULT_MACHINES, salary:{} });
-        }
-        setDbConnected(true);
-        setLoading(false);
-      } catch (e) {
-        if (active) { setDbConnected(false); setLoading(false); }
-      }
-    };
-    fetchData();
-    const interval = setInterval(fetchData, 4000);
-    return () => { active = false; clearInterval(interval); };
-  }, []);
-
-  useEffect(() => {
-    if (!dbConnected) return;
-    if (skipWrite) { setSkipWrite(false); return; }
-    (async () => {
-      try {
-        await fetch(FIREBASE_URL, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ requests: data.requests, tasks: data.tasks, workTime: data.workTime, machines: data.machines, salary: data.salary || {} })
-        });
-      } catch (e) { console.error(e); }
-    })();
-    // eslint-disable-next-line
-  }, [data, dbConnected]);
-
+  useEffect(() => { saveData(data); }, [data]);
   const upd = fn => setData(prev => { const d = JSON.parse(JSON.stringify(prev)); fn(d); return d; });
 
   const getReqsForDateByEmployee = (empId, date) => {
@@ -175,16 +154,6 @@ export default function App() {
   const canAddReq  = (u) => u && (u.role === "manager" || u.role === "supervisor");
   const monthDays  = (y, m) => Array.from({length: new Date(y, m, 0).getDate()}, (_,i) => `${y}-${String(m).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
 
-  // LOADING
-  if (loading) return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff" }}>
-      <div style={{ textAlign:"center" }}>
-        <div style={{ fontSize:40, marginBottom:10 }}>👥</div>
-        <div>Загрузка...</div>
-      </div>
-    </div>
-  );
-
   // LOGIN
   if (!currentUser) return (
     <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
@@ -194,10 +163,7 @@ export default function App() {
             onError={e => { e.target.style.display = "none"; }} />
         </div>
         <h2 style={{ margin:"0 0 6px", color:"#1e3a5f", textAlign:"center" }}>👥 Команда</h2>
-        <p style={{ margin:"0 0 4px", color:"#aaa", textAlign:"center", fontSize:12 }}>Транспорт М5</p>
-        <p style={{ margin:"0 0 18px", textAlign:"center", fontSize:11, color: dbConnected ? "#27ae60" : "#e74c3c" }}>
-          {dbConnected ? "🟢 Подключено" : "🔴 Нет связи с сервером"}
-        </p>
+        <p style={{ margin:"0 0 22px", color:"#aaa", textAlign:"center", fontSize:12 }}>Транспорт М5</p>
         <label style={{ fontSize:12, color:"#555" }}>Пользователь</label>
         <select value={loginName} onChange={e => setLoginName(e.target.value)} style={{ ...S.select, width:"100%", margin:"4px 0 10px" }}>
           <option value="">— выберите —</option>
@@ -209,8 +175,9 @@ export default function App() {
         {loginErr && <p style={{ color:"red", fontSize:12, margin:"0 0 10px", textAlign:"center" }}>{loginErr}</p>}
         <button onClick={() => {
           const u = data.users.find(x => x.id === Number(loginName) && x.pin === loginPin);
-          if (u) { setCurrentUser(u); setLoginErr(""); setTab(u.role === "manager" || u.role === "supervisor" ? "overview" : "plan"); }
-          else setLoginErr("Неверный пользователь или PIN");
+          if (!u) { setLoginErr("Неверный пользователь или PIN"); return; }
+          if (u.blocked) { setLoginErr("🔒 Доступ заблокирован"); return; }
+          setCurrentUser(u); setLoginErr(""); setTab(u.role === "manager" || u.role === "supervisor" ? "overview" : "plan");
         }} style={{ ...S.btn(), width:"100%", padding:10, fontSize:15 }}>Войти</button>
       </div>
     </div>
@@ -329,14 +296,14 @@ export default function App() {
     return (
       <div style={S.page}>
         <div style={S.header}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }}
-              onError={e => { e.target.style.display = "none"; }} />
-            <div>
-              <div style={{ fontWeight:700, fontSize:15 }}>👑 {currentUser.name}</div>
-              <div style={{ fontSize:12, opacity:0.8 }}>{currentUser.role==="manager"?"Руководитель":"Менеджер"}</div>
-            </div>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }}
+            onError={e => { e.target.style.display = "none"; }} />
+          <div>
+            <div style={{ fontWeight:700, fontSize:15 }}>👑 {currentUser.name}</div>
+            <div style={{ fontSize:12, opacity:0.8 }}>{currentUser.role==="manager"?"Руководитель":"Менеджер"}</div>
           </div>
+        </div>
           <button onClick={() => setCurrentUser(null)} style={{ background:"rgba(255,255,255,0.2)", border:"none", color:"#fff", borderRadius:8, padding:"5px 12px", cursor:"pointer", fontSize:13 }}>Выйти</button>
         </div>
 
@@ -723,12 +690,19 @@ export default function App() {
           {manTab==="machines" && <MachinesPanel />}
 
           {manTab==="users" && data.users.map(u=>(
-            <div key={u.id} style={{...S.card,display:"flex",alignItems:"center",gap:12,padding:"12px 14px"}}>
+            <div key={u.id} style={{...S.card,display:"flex",alignItems:"center",gap:12,padding:"12px 14px",opacity:u.blocked?0.6:1}}>
               <span style={{fontSize:22}}>{u.role==="manager"?"👑":u.role==="driver"?"🚗":"📋"}</span>
-              <div>
+              <div style={{flex:1}}>
                 <div style={{fontWeight:600,color:"#1e3a5f",fontSize:14}}>{u.name}</div>
                 <div style={{fontSize:12,color:"#888"}}>PIN: {u.pin} · {u.role==="manager"?"Руководитель":u.role==="driver"?"Водитель":"Менеджер"}</div>
               </div>
+              {u.blocked && <span style={S.tag({background:"#fdecea",color:"#e74c3c",fontWeight:700})}>🔒 Заблокирован</span>}
+              {currentUser.role==="manager" && u.id!==currentUser.id && (
+                <button onClick={()=>upd(d=>{const usr=d.users.find(x=>x.id===u.id);if(usr)usr.blocked=!usr.blocked;})}
+                  style={{...S.btn(u.blocked?"#e8f7ee":"#fde8e8"),color:u.blocked?"#27ae60":"#c0392b"}}>
+                  {u.blocked?"🔓 Разблокировать":"🔒 Заблокировать"}
+                </button>
+              )}
             </div>
           ))}
         </div>
