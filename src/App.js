@@ -711,7 +711,7 @@ export default function App() {
               <span style={{fontSize:22}}>{u.role==="manager"?"👑":u.role==="driver"?"🚗":"📋"}</span>
               <div style={{flex:1}}>
                 <div style={{fontWeight:600,color:"#1e3a5f",fontSize:14}}>{u.name}</div>
-                <div style={{fontSize:12,color:"#888"}}>PIN: {u.pin} · {u.role==="manager"?"Руководитель":u.role==="driver"?"Водитель":"Менеджер"}</div>
+                <div style={{fontSize:12,color:"#888"}}>{u.role==="manager"?"Руководитель":u.role==="driver"?"Водитель":"Менеджер"}</div>
               </div>
               {u.blocked && <span style={S.tag({background:"#fdecea",color:"#e74c3c",fontWeight:700})}>🔒 Заблокирован</span>}
               {currentUser.role==="manager" && u.id!==currentUser.id && (
