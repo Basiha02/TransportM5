@@ -1,6 +1,12 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
-const STORAGE_KEY = "team_work_app_m5_new";
+const SUPABASE_URL = "https://yatwchgupbhrszgbdmtm.supabase.co";
+const SUPABASE_KEY = "sb_publishable_giLV8Jm4CsxlW6ptSkv8ng_9bJ4jm6f";
+const SB_HEADERS = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+};
 
 const DEFAULT_USERS = [
   { id: 1,  name: "Колдаева Юлия Юрьевна",           role: "manager",    pin: "0000" },
@@ -39,10 +45,24 @@ const DEFAULT_MACHINES = [
   { id: 15, name: "УАЗ О599ВУ774" },
 ];
 
-function initData() {
+function blankData() {
+  return {
+    users: DEFAULT_USERS,
+    requests: {},
+    tasks: [],
+    workTime: {},
+    machines: DEFAULT_MACHINES,
+    salary: {},
+  };
+}
+
+async function loadData() {
   try {
-    const s = localStorage.getItem(STORAGE_KEY);
-    const saved = s ? JSON.parse(s) : {};
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, {
+      headers: SB_HEADERS,
+    });
+    const json = await res.json();
+    const saved = (json && json[0] && json[0].data) ? json[0].data : {};
     const blockedMap = saved.blockedUsers || {};
     const users = DEFAULT_USERS.map(u => ({ ...u, blocked: !!blockedMap[u.id] }));
     return {
@@ -50,21 +70,27 @@ function initData() {
       requests: saved.requests || {},
       tasks: saved.tasks || [],
       workTime: saved.workTime || {},
-      machines: DEFAULT_MACHINES,
+      machines: saved.machines && saved.machines.length ? saved.machines : DEFAULT_MACHINES,
       salary: saved.salary || {},
     };
   } catch {
-    return { users: DEFAULT_USERS, requests:{}, tasks:[], workTime:{}, machines: DEFAULT_MACHINES, salary:{} };
+    return blankData();
   }
 }
 
-function saveData(d) {
+async function saveData(d) {
   try {
     const blockedUsers = {};
     d.users.forEach(u => { if (u.blocked) blockedUsers[u.id] = true; });
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      requests: d.requests, tasks: d.tasks, workTime: d.workTime, salary: d.salary || {}, blockedUsers
-    }));
+    const payload = {
+      requests: d.requests, tasks: d.tasks, workTime: d.workTime,
+      salary: d.salary || {}, blockedUsers, machines: d.machines
+    };
+    await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main`, {
+      method: "PATCH",
+      headers: { ...SB_HEADERS, "Prefer": "return=minimal" },
+      body: JSON.stringify({ data: payload, updated_at: new Date().toISOString() }),
+    });
   } catch {}
 }
 
@@ -85,7 +111,8 @@ const S = {
 };
 
 export default function App() {
-  const [data, setData]         = useState(initData);
+  const [data, setData]         = useState(blankData());
+  const [loaded, setLoaded]     = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
   const [loginName, setLoginName] = useState("");
   const [loginPin,  setLoginPin]  = useState("");
@@ -105,7 +132,36 @@ export default function App() {
   const [eYear,     setEYear]     = useState(new Date().getFullYear());
   const [eMonth,    setEMonth]    = useState(new Date().getMonth()+1);
 
-  useEffect(() => { saveData(data); }, [data]);
+  const dataRef = useRef(data);
+  dataRef.current = data;
+  const saveTimer = useRef(null);
+  const skipNextPoll = useRef(false);
+
+  // Initial load
+  useEffect(() => {
+    loadData().then(d => { setData(d); setLoaded(true); });
+  }, []);
+
+  // Periodic refresh from server (so other devices' changes appear)
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (skipNextPoll.current) { skipNextPoll.current = false; return; }
+      loadData().then(d => setData(d));
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Debounced save on data change
+  useEffect(() => {
+    if (!loaded) return;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      skipNextPoll.current = true;
+      saveData(dataRef.current);
+    }, 600);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [data, loaded]);
+
   const upd = fn => setData(prev => { const d = JSON.parse(JSON.stringify(prev)); fn(d); return d; });
 
   const getReqsForDateByEmployee = (empId, date) => {
@@ -153,6 +209,16 @@ export default function App() {
   const isPastDate = (date) => currentUser?.role === "driver" && date < todayStr();
   const canAddReq  = (u) => u && (u.role === "manager" || u.role === "supervisor");
   const monthDays  = (y, m) => Array.from({length: new Date(y, m, 0).getDate()}, (_,i) => `${y}-${String(m).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
+
+  // LOADING
+  if (!loaded) return (
+    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"sans-serif" }}>
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:40, marginBottom:10 }}>⏳</div>
+        <div>Загрузка данных...</div>
+      </div>
+    </div>
+  );
 
   // LOGIN
   if (!currentUser) return (
@@ -286,7 +352,7 @@ export default function App() {
       { id:"plan",              label:"📅 План" },
       { id:"machines_overview", label:"🚜 Техника" },
       { id:"tasks",             label:"✅ Задачи" },
-      ...(currentUser.role === "manager" ? [{ id:"report", label:"📈 Отчёт" }, { id:"salary", label:"💰 Зарплата" }] : []),
+      ...(currentUser.role === "manager" ? [{ id:"report", label:"📈 Отчёт" }] : []),
       { id:"machines",          label:"⚙️ Список" },
       { id:"users",             label:"👤 Люди" },
     ];
@@ -543,12 +609,12 @@ export default function App() {
             const downloadExcel = () => {
               let csv="\uFEFF";
               csv+=`Отчёт за ${MONTHS[repMonth-1]} ${repYear}\n\n`;
-              csv+="Водитель;Дата;Заявка;Техника;Организация;Маршрут;Рейсов;Время с;Время до;Часов;Сумма ₽\n";
+              csv+="Водитель;Дата;Заявка;Техника;Организация;Маршрут;Рейсов;Время с;Время до;Часов\n";
               drivers.forEach(drv=>{
                 allDays.forEach(date=>{
                   const wt=data.workTime[drv.id]?.[date]||{};
                   const items=getReqsForDateByEmployee(drv.id,date).filter(r=>r.done);
-                  items.forEach(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));const amount=data.salary?.[r.id]||"";csv+=`${drv.name};${fmtDate(date)};${r.title};${m?.name||""};${wt.org||""};${wt.route||""};${wt.trips||""};${wt.from||""};${wt.to||""};${calcHours(wt.from,wt.to)};${amount}\n`;});
+                  items.forEach(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));csv+=`${drv.name};${fmtDate(date)};${r.title};${m?.name||""};${wt.org||""};${wt.route||""};${wt.trips||""};${wt.from||""};${wt.to||""};${calcHours(wt.from,wt.to)}\n`;});
                 });
               });
               const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
@@ -639,54 +705,6 @@ export default function App() {
             );
           })()}
 
-          {/* ЗАРПЛАТА */}
-          {manTab==="salary" && currentUser.role==="manager" && (() => {
-            const allDays = monthDays(repYear, repMonth);
-            return (
-              <div>
-                <div style={{...S.card,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-                  <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Месяц</label>
-                    <select value={repMonth} onChange={e=>setRepMonth(Number(e.target.value))} style={S.select}>{MONTHS.map((n,i)=><option key={i+1} value={i+1}>{n}</option>)}</select></div>
-                  <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Год</label>
-                    <select value={repYear} onChange={e=>setRepYear(Number(e.target.value))} style={S.select}>{[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}</select></div>
-                </div>
-                {drivers.map(drv=>{
-                  const doneItems=allDays.flatMap(date=>getReqsForDateByEmployee(drv.id,date).filter(r=>r.done).map(r=>({...r,date})));
-                  const totalSalary=doneItems.reduce((s,r)=>s+Number(data.salary?.[r.id]||0),0);
-                  return(
-                    <div key={drv.id} style={S.card}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div style={{fontWeight:700,color:"#1e3a5f",fontSize:14}}>🚗 {drv.name}</div>
-                        <div style={{fontWeight:700,color:"#27ae60",fontSize:16}}>{totalSalary.toLocaleString("ru")} ₽</div>
-                      </div>
-                      {doneItems.length===0&&<div style={{color:"#ccc",fontSize:13}}>Нет выполненных заявок</div>}
-                      {doneItems.map(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));return(
-                        <div key={r.id} style={{padding:"8px 0",borderTop:"1px solid #f5f5f5"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,fontSize:13}}>
-                            <span style={{color:"#2d6a9f",fontWeight:600,minWidth:70}}>{fmtDate(r.date)}</span>
-                            <span style={{flex:1}}>{r.title}</span>
-                            {m&&<span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {m.name}</span>}
-                          </div>
-                          <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                            <input type="number" min="0" placeholder="Сумма (₽)" value={data.salary?.[r.id]||""}
-                              onChange={e=>upd(d=>{if(!d.salary)d.salary={};d.salary[r.id]=e.target.value;})}
-                              style={{...S.input,width:140,fontSize:14}}/>
-                            <span style={{fontSize:13,color:"#888"}}>₽</span>
-                            {data.salary?.[r.id]&&<span style={S.tag({background:"#e8f7ee",color:"#27ae60",fontWeight:700})}>✓ {Number(data.salary[r.id]).toLocaleString("ru")} ₽</span>}
-                          </div>
-                        </div>
-                      );})}
-                      {doneItems.length>0&&<div style={{marginTop:10,paddingTop:10,borderTop:"2px solid #f0f0f0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                        <span style={{fontSize:13,color:"#555"}}>Итого за {MONTHS[repMonth-1]}:</span>
-                        <span style={{fontWeight:700,color:"#27ae60",fontSize:18}}>{totalSalary.toLocaleString("ru")} ₽</span>
-                      </div>}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-
           {manTab==="machines" && <MachinesPanel />}
 
           {manTab==="users" && data.users.map(u=>(
@@ -712,7 +730,7 @@ export default function App() {
 
   // DRIVER / EMPLOYEE VIEW
   const empTabs = currentUser.role==="driver"
-    ? [{id:"plan",label:"📅 План"},{id:"today",label:"🕐 Сегодня"},{id:"earnings",label:"💰 Заработок"}]
+    ? [{id:"plan",label:"📅 План"},{id:"today",label:"🕐 Сегодня"}]
     : [{id:"plan",label:"📅 План"},{id:"today",label:"🕐 Сегодня"},{id:"tasks",label:"✅ Задачи"},{id:"machines",label:"🚜 Техника"}];
 
   const myTasks   = data.tasks.filter(t => t.assignedTo === currentUser.id);
@@ -828,43 +846,6 @@ export default function App() {
             })}
           </div>
         )}
-
-        {tab==="earnings" && currentUser.role==="driver" && (() => {
-          const allDays = monthDays(eYear, eMonth);
-          const doneItems = allDays.flatMap(date => getReqsForDateByEmployee(currentUser.id,date).filter(r=>r.done).map(r=>({...r,date})));
-          const totalEarned = doneItems.reduce((s,r)=>s+Number(data.salary?.[r.id]||0),0);
-          const paid = doneItems.filter(r=>data.salary?.[r.id]);
-          return(
-            <div>
-              <div style={{...S.card,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-                <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Месяц</label>
-                  <select value={eMonth} onChange={e=>setEMonth(Number(e.target.value))} style={S.select}>{MONTHS.map((n,i)=><option key={i+1} value={i+1}>{n}</option>)}</select></div>
-                <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Год</label>
-                  <select value={eYear} onChange={e=>setEYear(Number(e.target.value))} style={S.select}>{[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}</select></div>
-              </div>
-              <div style={{...S.card,textAlign:"center",background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)",color:"#fff"}}>
-                <div style={{fontSize:13,opacity:0.8,marginBottom:4}}>Мой заработок за {MONTHS[eMonth-1]} {eYear}</div>
-                <div style={{fontSize:36,fontWeight:700}}>{totalEarned.toLocaleString("ru")} ₽</div>
-                <div style={{fontSize:12,opacity:0.7,marginTop:4}}>Начислено за {paid.length} из {doneItems.length} рейсов</div>
-              </div>
-              {doneItems.length===0&&<div style={{color:"#aaa",textAlign:"center",padding:30}}>Нет выполненных заявок за этот месяц</div>}
-              {doneItems.map(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));const amount=data.salary?.[r.id];return(
-                <div key={r.id} style={{...S.card,display:"flex",alignItems:"center",gap:10}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontWeight:500,fontSize:14,color:"#222",marginBottom:4}}>{r.title}</div>
-                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                      <span style={{fontSize:12,color:"#888"}}>{fmtDate(r.date)}</span>
-                      {m&&<span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {m.name}</span>}
-                    </div>
-                  </div>
-                  <div style={{textAlign:"right"}}>
-                    {amount?<div style={{fontWeight:700,color:"#27ae60",fontSize:16}}>{Number(amount).toLocaleString("ru")} ₽</div>:<div style={{fontSize:12,color:"#aaa"}}>Не начислено</div>}
-                  </div>
-                </div>
-              );})}
-            </div>
-          );
-        })()}
 
         {tab==="tasks" && (
           <div>
