@@ -46,21 +46,12 @@ const DEFAULT_MACHINES = [
 ];
 
 function blankData() {
-  return {
-    users: DEFAULT_USERS,
-    requests: {},
-    tasks: [],
-    workTime: {},
-    machines: DEFAULT_MACHINES,
-    salary: {},
-  };
+  return { users: DEFAULT_USERS, requests: {}, tasks: [], workTime: {}, machines: DEFAULT_MACHINES, salary: {} };
 }
 
 async function loadData() {
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, {
-      headers: SB_HEADERS,
-    });
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, { headers: SB_HEADERS });
     const json = await res.json();
     if (!json || !json[0] || !json[0].data) return null;
     const saved = json[0].data;
@@ -74,53 +65,39 @@ async function loadData() {
       machines: saved.machines && saved.machines.length ? saved.machines : DEFAULT_MACHINES,
       salary: saved.salary || {},
     };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function saveData(d) {
   try {
-    // Сначала читаем свежие данные с сервера
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, {
-      headers: SB_HEADERS,
-    });
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, { headers: SB_HEADERS });
     const json = await res.json();
     const serverRaw = (json && json[0] && json[0].data) ? json[0].data : {};
-
-    // Merge: берём с сервера requests, workTime (могут менять другие пользователи),
-    // но tasks, machines, blockedUsers, salary берём из нашей локальной версии
-    // (их редактирует только менеджер, конфликтов меньше)
     const blockedUsers = {};
     d.users.forEach(u => { if (u.blocked) blockedUsers[u.id] = true; });
-
-    // Для requests и workTime — объединяем по ключам (user id / date),
-    // локальные данные побеждают только для текущего пользователя
     const mergedRequests = { ...serverRaw.requests };
     Object.keys(d.requests).forEach(uid => {
       mergedRequests[uid] = { ...(serverRaw.requests?.[uid] || {}), ...d.requests[uid] };
     });
-
     const mergedWorkTime = { ...serverRaw.workTime };
     Object.keys(d.workTime).forEach(uid => {
       mergedWorkTime[uid] = { ...(serverRaw.workTime?.[uid] || {}), ...d.workTime[uid] };
     });
-
-    const payload = {
-      requests: mergedRequests,
-      tasks: d.tasks,
-      workTime: mergedWorkTime,
-      salary: d.salary || {},
-      blockedUsers,
-      machines: d.machines,
-    };
-
-    await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main`, {
+    const payload = { requests: mergedRequests, tasks: d.tasks, workTime: mergedWorkTime, salary: d.salary || {}, blockedUsers, machines: d.machines };
+    const saveRes = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main`, {
       method: "PATCH",
       headers: { ...SB_HEADERS, "Prefer": "return=minimal" },
       body: JSON.stringify({ data: payload, updated_at: new Date().toISOString() }),
     });
-  } catch {}
+    if (!saveRes.ok) {
+      const errText = await saveRes.text();
+      console.error("Supabase save error:", saveRes.status, errText);
+      throw new Error(`HTTP ${saveRes.status}: ${errText}`);
+    }
+  } catch(e) {
+    console.error("saveData failed:", e);
+    throw e;
+  }
 }
 
 const todayStr    = () => new Date().toISOString().slice(0, 10);
@@ -140,8 +117,9 @@ const S = {
 };
 
 export default function App() {
-  const [data, setData]         = useState(blankData());
+  const [data, setData]         = useState(blankData);
   const [loaded, setLoaded]     = useState(false);
+  const [saveStatus, setSaveStatus] = useState(""); // "", "saving", "saved", "error"
   const [currentUser, setCurrentUser] = useState(null);
   const [loginName, setLoginName] = useState("");
   const [loginPin,  setLoginPin]  = useState("");
@@ -158,45 +136,69 @@ export default function App() {
   const [repMonth,  setRepMonth]  = useState(new Date().getMonth()+1);
   const [repSub,    setRepSub]    = useState("machines");
   const [ovMode,    setOvMode]    = useState("day");
-  const [eYear,     setEYear]     = useState(new Date().getFullYear());
-  const [eMonth,    setEMonth]    = useState(new Date().getMonth()+1);
 
-  const dataRef = useRef(data);
-  dataRef.current = data;
-  const saveTimer = useRef(null);
+  const dataRef    = useRef(data);
   const pendingSave = useRef(false);
+  dataRef.current  = data;
 
-  // Initial load
   useEffect(() => {
     loadData().then(d => { if (d) setData(d); setLoaded(true); });
   }, []);
 
-  // Periodic refresh from server (so other devices' changes appear).
-  // Only updates local view — never triggers a save. Ignores null/failed responses.
   useEffect(() => {
     const id = setInterval(() => {
-      if (!pendingSave.current) {
-        loadData().then(d => { if (d) setData(d); });
-      }
+      if (!pendingSave.current) loadData().then(d => { if (d) setData(d); });
     }, 5000);
     return () => clearInterval(id);
   }, []);
 
-  // upd() applies a local change AND schedules a save to the server.
   const upd = fn => {
     pendingSave.current = true;
+    setSaveStatus("");
     setData(prev => {
       const d = JSON.parse(JSON.stringify(prev));
       fn(d);
       dataRef.current = d;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(async () => {
-        await saveData(dataRef.current);
-        pendingSave.current = false;
-      }, 600);
       return d;
     });
   };
+
+  const [saveError, setSaveError] = useState("");
+
+  const handleSave = async () => {
+    setSaveStatus("saving");
+    setSaveError("");
+    try {
+      await saveData(dataRef.current);
+      setSaveStatus("saved");
+      pendingSave.current = false;
+      setTimeout(() => setSaveStatus(""), 2000);
+    } catch(e) {
+      setSaveStatus("error");
+      setSaveError(e?.message || "Неизвестная ошибка");
+    }
+  };
+
+  const SaveBtn = () => (
+    <div>
+      <button onClick={handleSave} disabled={saveStatus==="saving"} style={{
+        ...S.btn(saveStatus==="saved"?"#27ae60":saveStatus==="error"?"#e74c3c":"#2d6a9f"),
+        width:"100%", padding:11, fontSize:15, marginTop:8,
+        opacity: saveStatus==="saving" ? 0.7 : 1
+      }}>
+        {saveStatus==="saving" ? "⏳ Сохраняем..." : saveStatus==="saved" ? "✅ Сохранено!" : saveStatus==="error" ? "❌ Ошибка, попробуйте ещё раз" : "💾 Сохранить"}
+      </button>
+      {saveStatus==="error" && saveError && (
+        <div style={{fontSize:11,color:"#e74c3c",marginTop:4,padding:"4px 8px",background:"#fdecea",borderRadius:6}}>
+          {saveError}
+        </div>
+      )}
+    </div>
+  );
+
+  const isPastDate = (date) => currentUser?.role === "driver" && date < todayStr();
+  const canAddReq  = (u) => u && (u.role === "manager" || u.role === "supervisor");
+  const monthDays  = (y, m) => Array.from({length: new Date(y, m, 0).getDate()}, (_,i) => `${y}-${String(m).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
 
   const getReqsForDateByEmployee = (empId, date) => {
     const result = [];
@@ -240,17 +242,10 @@ export default function App() {
     setNewMachine("");
   };
 
-  const isPastDate = (date) => currentUser?.role === "driver" && date < todayStr();
-  const canAddReq  = (u) => u && (u.role === "manager" || u.role === "supervisor");
-  const monthDays  = (y, m) => Array.from({length: new Date(y, m, 0).getDate()}, (_,i) => `${y}-${String(m).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
-
   // LOADING
   if (!loaded) return (
     <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"sans-serif" }}>
-      <div style={{ textAlign:"center" }}>
-        <div style={{ fontSize:40, marginBottom:10 }}>⏳</div>
-        <div>Загрузка данных...</div>
-      </div>
+      <div style={{ textAlign:"center" }}><div style={{ fontSize:40, marginBottom:10 }}>⏳</div><div>Загрузка данных...</div></div>
     </div>
   );
 
@@ -259,8 +254,7 @@ export default function App() {
     <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
       <div style={{ background:"#fff", borderRadius:16, padding:32, width:"100%", maxWidth:340, boxShadow:"0 8px 32px rgba(0,0,0,0.2)" }}>
         <div style={{ display:"flex", justifyContent:"center", marginBottom:14 }}>
-          <img src="/Logo.jpg" alt="Логотип" style={{ maxWidth:120, maxHeight:80, objectFit:"contain", borderRadius:8 }}
-            onError={e => { e.target.style.display = "none"; }} />
+          <img src="/Logo.jpg" alt="Логотип" style={{ maxWidth:120, maxHeight:80, objectFit:"contain", borderRadius:8 }} onError={e => { e.target.style.display = "none"; }} />
         </div>
         <h2 style={{ margin:"0 0 6px", color:"#1e3a5f", textAlign:"center" }}>👥 Команда</h2>
         <p style={{ margin:"0 0 22px", color:"#aaa", textAlign:"center", fontSize:12 }}>Транспорт М5</p>
@@ -289,8 +283,7 @@ export default function App() {
       <div style={S.card}>
         <div style={{ fontWeight:600, color:"#1e3a5f", marginBottom:10 }}>➕ Добавить технику</div>
         <div style={{ display:"flex", gap:8 }}>
-          <input value={newMachine} onChange={e => setNewMachine(e.target.value)} onKeyDown={e => e.key==="Enter"&&addMachine()}
-            placeholder="Название техники..." style={{ ...S.input, flex:1 }} />
+          <input value={newMachine} onChange={e => setNewMachine(e.target.value)} onKeyDown={e => e.key==="Enter"&&addMachine()} placeholder="Название техники..." style={{ ...S.input, flex:1 }} />
           <button onClick={addMachine} style={S.btn()}>+</button>
         </div>
       </div>
@@ -302,17 +295,16 @@ export default function App() {
             {m.repair && <div style={{ fontSize:11, color:"#e74c3c" }}>На ремонте</div>}
           </div>
           <button onClick={() => upd(d => {
-            const mm = d.machines.find(x => x.id === m.id);
-            if (!mm) return;
+            const mm = d.machines.find(x => x.id === m.id); if (!mm) return;
             if (!mm.repair) { mm.repair = true; mm.repairSince = todayStr(); }
             else { mm.repair = false; if (!mm.repairLog) mm.repairLog = []; mm.repairLog.push({ from: mm.repairSince || todayStr(), to: todayStr() }); mm.repairSince = null; }
           })} style={{ background:m.repair?"#e8f7ee":"#fef3e2", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:11, color:m.repair?"#27ae60":"#e67e22" }}>
             {m.repair?"✓ Вернуть в строй":"🔧 На ремонт"}
           </button>
-          {m.id > 15 && <button onClick={() => upd(d => { d.machines = d.machines.filter(x => x.id !== m.id); })}
-            style={{ background:"#fde8e8", border:"none", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:11, color:"#c0392b" }}>✕</button>}
+          {m.id > 15 && <button onClick={() => upd(d => { d.machines = d.machines.filter(x => x.id !== m.id); })} style={{ background:"#fde8e8", border:"none", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:11, color:"#c0392b" }}>✕</button>}
         </div>
       ))}
+      <SaveBtn />
     </div>
   );
 
@@ -329,21 +321,19 @@ export default function App() {
           <div style={S.card}>
             <div style={{ fontWeight:600, color:"#1e3a5f", marginBottom:10 }}>➕ Новая заявка</div>
             <input value={newReq.title} onChange={e => setNewReq(p => ({ ...p, title:e.target.value }))}
-              onKeyDown={e => e.key==="Enter"&&addRequest()} placeholder="Название заявки..."
-              style={{ ...S.input, width:"100%", marginBottom:8 }} />
-            <select value={newReq.machineId} onChange={e => setNewReq(p => ({ ...p, machineId:e.target.value }))}
-              style={{ ...S.select, width:"100%", marginBottom:8 }}>
+              onKeyDown={e => e.key==="Enter"&&addRequest()} placeholder="Название заявки..." style={{ ...S.input, width:"100%", marginBottom:8 }} />
+            <select value={newReq.machineId} onChange={e => setNewReq(p => ({ ...p, machineId:e.target.value }))} style={{ ...S.select, width:"100%", marginBottom:8 }}>
               <option value="">🚜 Без техники</option>
               {data.machines.filter(m=>!m.repair).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
-            <select value={newReq.assignedTo} onChange={e => setNewReq(p => ({ ...p, assignedTo:e.target.value }))}
-              style={{ ...S.select, width:"100%", marginBottom:10 }}>
+            <select value={newReq.assignedTo} onChange={e => setNewReq(p => ({ ...p, assignedTo:e.target.value }))} style={{ ...S.select, width:"100%", marginBottom:10 }}>
               <option value="">👤 Назначить сотрудника (по умолчанию — я)</option>
               {data.users.filter(u => u.role !== "manager").map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
             </select>
             <button onClick={addRequest} style={{ ...S.btn(), width:"100%", padding:9 }}>Добавить заявку</button>
           </div>
         )}
+        <SaveBtn />
         {planReqs.length === 0 && <div style={{ color:"#888", textAlign:"center", padding:24 }}>{currentUser.role==="driver"?"🚗":"📋"} На {fmtDate(selDate)} заявок нет</div>}
         {planReqs.map(r => {
           const m = data.machines.find(x => x.id === Number(r.machineId));
@@ -396,14 +386,13 @@ export default function App() {
     return (
       <div style={S.page}>
         <div style={S.header}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }}
-            onError={e => { e.target.style.display = "none"; }} />
-          <div>
-            <div style={{ fontWeight:700, fontSize:15 }}>👑 {currentUser.name}</div>
-            <div style={{ fontSize:12, opacity:0.8 }}>{currentUser.role==="manager"?"Руководитель":"Менеджер"}</div>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }} onError={e => { e.target.style.display = "none"; }} />
+            <div>
+              <div style={{ fontWeight:700, fontSize:15 }}>👑 {currentUser.name}</div>
+              <div style={{ fontSize:12, opacity:0.8 }}>{currentUser.role==="manager"?"Руководитель":"Менеджер"}</div>
+            </div>
           </div>
-        </div>
           <button onClick={() => setCurrentUser(null)} style={{ background:"rgba(255,255,255,0.2)", border:"none", color:"#fff", borderRadius:8, padding:"5px 12px", cursor:"pointer", fontSize:13 }}>Выйти</button>
         </div>
 
@@ -419,7 +408,6 @@ export default function App() {
 
         <div style={{ padding:14, maxWidth:700, margin:"0 auto" }}>
 
-          {/* СВОДКА */}
           {manTab==="overview" && (() => {
             const weekDays = Array.from({length:7}, (_,i) => { const d=new Date(manDate); d.setDate(d.getDate()+i); return d.toISOString().slice(0,10); });
             const dayNames = ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
@@ -437,7 +425,6 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-
                 {ovMode==="week" && (
                   <div>
                     <div style={{ fontSize:12, color:"#888", marginBottom:10 }}>Неделя: {fmtDate(weekDays[0])} — {fmtDate(weekDays[6])}</div>
@@ -473,7 +460,6 @@ export default function App() {
                     })}
                   </div>
                 )}
-
                 {ovMode==="day" && (() => {
                   const dayTotals = employees.reduce((acc,emp) => { const items=getReqsForDateByEmployee(emp.id,manDate); const wt=data.workTime[emp.id]?.[manDate]||{}; acc.total+=items.length; acc.done+=items.filter(r=>r.done).length; acc.hours+=Number(calcHours(wt.from,wt.to)||0); acc.trips+=Number(wt.trips||0); return acc; }, {total:0,done:0,hours:0,trips:0});
                   return (
@@ -484,7 +470,6 @@ export default function App() {
                     </div>
                   );
                 })()}
-
                 {ovMode==="day" && sorted.map(emp => {
                   const items = getReqsForDateByEmployee(emp.id, manDate);
                   const wt = data.workTime[emp.id]?.[manDate] || {};
@@ -527,7 +512,6 @@ export default function App() {
 
           {manTab==="plan" && <PlanPanel />}
 
-          {/* ТЕХНИКА СВОДКА */}
           {manTab==="machines_overview" && (() => {
             const isBusy = m => getAllReqsForDate(manDate).some(r=>r.machineId===m.id) || data.tasks.some(t=>t.machineId===m.id&&t.date===manDate);
             const sorted = [...data.machines].sort((a,b)=>isBusy(b)-isBusy(a));
@@ -566,7 +550,6 @@ export default function App() {
             );
           })()}
 
-          {/* ЗАДАЧИ */}
           {manTab==="tasks" && (
             <div>
               <div style={S.card}>
@@ -592,6 +575,7 @@ export default function App() {
                   setNewTask({title:"",assignedTo:"",machineId:"",date:tomorrowStr(),time:""});
                 }} style={S.btn()}>Добавить</button>
               </div>
+              <SaveBtn />
               {data.tasks.length===0 && <div style={{color:"#aaa",textAlign:"center",padding:20}}>Задач пока нет</div>}
               {data.tasks.map(task => {
                 const emp=data.users.find(u=>u.id===task.assignedTo); const tm=data.machines.find(m=>m.id===task.machineId);
@@ -614,7 +598,6 @@ export default function App() {
             </div>
           )}
 
-          {/* ОТЧЁТ */}
           {manTab==="report" && currentUser.role==="manager" && (() => {
             const allDays = monthDays(repYear, repMonth);
             const daysInMonth = allDays.length;
@@ -775,8 +758,7 @@ export default function App() {
     <div style={S.page}>
       <div style={S.header}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }}
-            onError={e => { e.target.style.display = "none"; }} />
+          <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }} onError={e => { e.target.style.display = "none"; }} />
           <div>
             <div style={{fontWeight:700,fontSize:14}}>{currentUser.role==="driver"?"🚗":"👤"} {currentUser.name}</div>
             <div style={{fontSize:11,opacity:0.8}}>Сегодня: {fmtDate(todayStr())}</div>
@@ -840,7 +822,8 @@ export default function App() {
                 </div>
               </div>
             </div>
-            <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:8}}>Заявки на {fmtDate(todayDate)}</div>
+            <SaveBtn />
+            <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:8,marginTop:12}}>Заявки на {fmtDate(todayDate)}</div>
             {todayReqs.length===0&&<div style={{color:"#aaa",textAlign:"center",padding:20}}>Нет заявок на этот день</div>}
             {todayReqs.map(r=>{
               const m=data.machines.find(x=>x.id===Number(r.machineId));
@@ -896,6 +879,7 @@ export default function App() {
                 <span style={S.tag(task.done?{background:"#e8f7ee",color:"#27ae60"}:{background:"#fff3cd",color:"#e67e22"})}>{task.done?"Выполнено":"В работе"}</span>
               </div>
             ))}
+            <SaveBtn />
           </div>
         )}
 
