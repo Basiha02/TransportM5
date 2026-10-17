@@ -1,38 +1,44 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
+
+/* =====================================================================
+   Транспорт М5 — план работ и отчёты водителей
+   Хранение: Supabase, таблица app_data.
+   Каждая заявка — отдельная строка (id = "req_..."),
+   каждый отчёт водителя — отдельная строка (id = "rep_<id заявки>"),
+   настройки — строки "cfg_machines" и "cfg_blocked".
+   Поэтому сохранения разных людей не перезаписывают друг друга.
+   ===================================================================== */
 
 const SUPABASE_URL = "https://yatwchgupbhrszgbdmtm.supabase.co";
 const SUPABASE_KEY = "sb_publishable_giLV8Jm4CsxlW6ptSkv8ng_9bJ4jm6f";
-const SB_HEADERS = {
-  "Content-Type": "application/json",
-  "apikey": SUPABASE_KEY,
-  "Authorization": `Bearer ${SUPABASE_KEY}`,
-};
+const TABLE = "app_data";
 
-const DEFAULT_USERS = [
-  { id: 1,  name: "Колдаева Юлия Юрьевна",           role: "manager",    pin: "0000" },
-  { id: 2,  name: "Вафин Данил Закирьянович",          role: "driver",     pin: "0016" },
-  { id: 3,  name: "Касымов Руслан Раилевич",           role: "driver",     pin: "0002" },
-  { id: 4,  name: "Мурадымов Марат Хусаинович",        role: "driver",     pin: "0003" },
-  { id: 5,  name: "Нафигин Вадим Шавкатович",          role: "driver",     pin: "0004" },
-  { id: 6,  name: "Хадыев Марат Саримович",            role: "driver",     pin: "0005" },
-  { id: 7,  name: "Шакиров Марат Рашитович",           role: "driver",     pin: "0006" },
-  { id: 8,  name: "Шахвалеев Роман Рафидович",         role: "driver",     pin: "0007" },
-  { id: 9,  name: "Абдуллин Рафит Ансарович",          role: "driver",     pin: "0008" },
-  { id: 10, name: "Абдулин Руслан Марсович",           role: "driver",     pin: "0009" },
-  { id: 11, name: "Ямалетдинов Рамат Салахетдинович",  role: "driver",     pin: "0010" },
-  { id: 12, name: "Хамматов Ринат Фригатович",         role: "supervisor", pin: "0011" },
-  { id: 13, name: "Хамматов Эдуард Фригатович",        role: "manager",    pin: "0001" },
-  { id: 14, name: "Салахова Зимфира Маратовна",        role: "supervisor", pin: "0013" },
-  { id: 15, name: "Хамматов Фригат",                   role: "driver",     pin: "0014" },
-  { id: 16, name: "Оля",                               role: "supervisor", pin: "0015" },
-].map(u => ({ ...u, blocked: false }));
+const USERS = [
+  { id: 1,  name: "Колдаева Юлия Юрьевна",            role: "manager",    pin: "0000" },
+  { id: 13, name: "Хамматов Эдуард Фригатович",       role: "manager",    pin: "0001" },
+  { id: 12, name: "Хамматов Ринат Фригатович",        role: "supervisor", pin: "0011" },
+  { id: 14, name: "Салахова Зимфира Маратовна",       role: "supervisor", pin: "0013" },
+  { id: 16, name: "Оля",                              role: "supervisor", pin: "0015" },
+  { id: 3,  name: "Касымов Руслан Раилевич",          role: "driver",     pin: "0002" },
+  { id: 4,  name: "Мурадымов Марат Хусаинович",       role: "driver",     pin: "0003" },
+  { id: 5,  name: "Нафигин Вадим Шавкатович",         role: "driver",     pin: "0004" },
+  { id: 6,  name: "Хадыев Марат Саримович",           role: "driver",     pin: "0005" },
+  { id: 7,  name: "Шакиров Марат Рашитович",          role: "driver",     pin: "0006" },
+  { id: 8,  name: "Шахвалеев Роман Рафидович",        role: "driver",     pin: "0007" },
+  { id: 9,  name: "Абдуллин Рафит Ансарович",         role: "driver",     pin: "0008" },
+  { id: 10, name: "Абдулин Руслан Марсович",          role: "driver",     pin: "0009" },
+  { id: 11, name: "Ямалетдинов Рамат Салахетдинович", role: "driver",     pin: "0010" },
+  { id: 15, name: "Хамматов Фригат",                  role: "driver",     pin: "0014" },
+  { id: 2,  name: "Вафин Данил Закирьянович",         role: "driver",     pin: "0016" },
+];
 
-const DEFAULT_MACHINES = [
+const MACHINES = [
   { id: 1,  name: "Самосвал ХОВО Н 020 ЕА (774)" },
   { id: 2,  name: "Самосвал ХОВО О608 ВУ (774)" },
   { id: 3,  name: "Самосвал ХОВО Н495 ХА (174)" },
   { id: 4,  name: "Самосвал ШАКМАН Е324 ВР (774)" },
   { id: 5,  name: "Манипулятор ХОВО Н 576 ЕА (774)" },
+  { id: 14, name: "Манипулятор Е944 МС 174" },
   { id: 6,  name: "ДОНГ ФЕНГ К826 НР174" },
   { id: 7,  name: "УРАЛ 10Т. Х444КВ 174" },
   { id: 8,  name: "АВТОКРАН 25Т. Х964ММ174" },
@@ -41,849 +47,926 @@ const DEFAULT_MACHINES = [
   { id: 11, name: "ПОГРУЗЧИК В140 О006УС 74" },
   { id: 12, name: "МАЗ У302ВТ 774" },
   { id: 13, name: "ГРЕЙДЕР 0005УС 174" },
-  { id: 14, name: "Манипулятор Е944 МС 174" },
   { id: 15, name: "УАЗ О599ВУ774" },
 ];
 
-function blankData() {
-  return { users: DEFAULT_USERS, requests: {}, tasks: [], workTime: {}, machines: DEFAULT_MACHINES, salary: {} };
+const ROLE_LABEL = { manager: "Руководитель", supervisor: "Менеджер", driver: "Водитель" };
+const MONTHS = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+const WEEKDAYS = ["вс","пн","вт","ср","чт","пт","сб"];
+
+/* ---------------- даты и мелочи ---------------- */
+const pad = n => String(n).padStart(2, "0");
+const dateToStr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const todayStr = () => dateToStr(new Date());
+const addDays = (s, n) => { const [y, m, d] = s.split("-").map(Number); return dateToStr(new Date(y, m - 1, d + n)); };
+const fmtDate = s => { if (!s) return ""; const [y, m, d] = s.split("-"); return `${d}.${m}.${y}`; };
+const fmtDay = s => { const [y, m, d] = s.split("-").map(Number); return `${WEEKDAYS[new Date(y, m - 1, d).getDay()]}, ${pad(d)}.${pad(m)}`; };
+const monthOf = s => s.slice(0, 7);
+const calcHours = (f, t) => {
+  if (!f || !t) return 0;
+  const [fh, fm] = f.split(":").map(Number);
+  const [th, tm] = t.split(":").map(Number);
+  let m = (th * 60 + tm) - (fh * 60 + fm);
+  if (m < 0) m += 24 * 60; // ночная смена через полночь
+  return Math.round(m / 6) / 10;
+};
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const clone = o => JSON.parse(JSON.stringify(o));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const lsGet = k => { try { return window.localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { if (v === null) window.localStorage.removeItem(k); else window.localStorage.setItem(k, v); } catch {} };
+const userName = id => (USERS.find(u => u.id === Number(id)) || {}).name || "—";
+const shortName = id => { const n = userName(id).split(" "); return n.length > 1 ? `${n[0]} ${n[1][0]}.` : n[0]; };
+
+/* ---------------- индикатор связи ---------------- */
+const netListeners = new Set();
+let netOk = true;
+function setNet(ok) { if (ok !== netOk) { netOk = ok; netListeners.forEach(f => f(ok)); } }
+function useNet() {
+  const [ok, setOk] = useState(netOk);
+  useEffect(() => { netListeners.add(setOk); return () => { netListeners.delete(setOk); }; }, []);
+  return ok;
 }
 
-async function loadData() {
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, { headers: SB_HEADERS });
-    const json = await res.json();
-    if (!json || !json[0] || !json[0].data) return null;
-    const saved = json[0].data;
-    const blockedMap = saved.blockedUsers || {};
-    const users = DEFAULT_USERS.map(u => ({ ...u, blocked: !!blockedMap[u.id] }));
-    return {
-      users,
-      requests: saved.requests || {},
-      tasks: saved.tasks || [],
-      workTime: saved.workTime || {},
-      machines: saved.machines && saved.machines.length ? saved.machines : DEFAULT_MACHINES,
-      salary: saved.salary || {},
-    };
-  } catch { return null; }
-}
+/* ---------------- работа с базой ---------------- */
+function isDemo() { try { return typeof window !== "undefined" && window.__M5_DEMO__ === true; } catch { return false; } }
 
-async function saveData(d) {
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main&select=data`, { headers: SB_HEADERS });
-    const json = await res.json();
-    const serverRaw = (json && json[0] && json[0].data) ? json[0].data : {};
-    const blockedUsers = {};
-    d.users.forEach(u => { if (u.blocked) blockedUsers[u.id] = true; });
-    const mergedRequests = { ...serverRaw.requests };
-    Object.keys(d.requests).forEach(uid => {
-      mergedRequests[uid] = { ...(serverRaw.requests?.[uid] || {}), ...d.requests[uid] };
-    });
-    const mergedWorkTime = { ...serverRaw.workTime };
-    Object.keys(d.workTime).forEach(uid => {
-      mergedWorkTime[uid] = { ...(serverRaw.workTime?.[uid] || {}), ...d.workTime[uid] };
-    });
-    const payload = { requests: mergedRequests, tasks: d.tasks, workTime: mergedWorkTime, salary: d.salary || {}, blockedUsers, machines: d.machines };
-    const saveRes = await fetch(`${SUPABASE_URL}/rest/v1/app_data?id=eq.main`, {
-      method: "PATCH",
-      headers: { ...SB_HEADERS, "Prefer": "return=minimal" },
-      body: JSON.stringify({ data: payload, updated_at: new Date().toISOString() }),
-    });
-    if (!saveRes.ok) {
-      const errText = await saveRes.text();
-      console.error("Supabase save error:", saveRes.status, errText);
-      throw new Error(`HTTP ${saveRes.status}: ${errText}`);
+// Запрос к Supabase с таймаутом и автоповтором (до 4 попыток).
+// Все записи идемпотентны (запись по id), поэтому повтор безопасен.
+async function sbFetch(path, opts = {}) {
+  const { method = "GET", body, prefer } = opts;
+  let useAuth = true;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt > 0) await sleep(900 * attempt);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20000);
+    const headers = { "Content-Type": "application/json", apikey: SUPABASE_KEY };
+    if (useAuth) headers.Authorization = `Bearer ${SUPABASE_KEY}`;
+    if (prefer) headers.Prefer = prefer;
+    let res;
+    try {
+      res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+        method, headers, cache: "no-store", signal: ctrl.signal,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = new Error(e && e.name === "AbortError"
+        ? "Сервер долго не отвечает (возможно, база «просыпается»). Нажмите ещё раз через минуту."
+        : "Нет связи с сервером. Проверьте интернет и нажмите ещё раз.");
+      lastErr.network = true;
+      continue;
     }
-  } catch(e) {
-    console.error("saveData failed:", e);
-    throw e;
+    clearTimeout(timer);
+    const text = await res.text().catch(() => "");
+    if (res.ok) {
+      setNet(true);
+      if (!text) return null;
+      try { return JSON.parse(text); } catch { return null; }
+    }
+    if ((res.status === 401 || res.status === 403) && useAuth) {
+      useAuth = false; // вторая попытка — только с apikey
+      lastErr = new Error(`Доступ отклонён сервером (${res.status}). ${text.slice(0, 200)}`);
+      continue;
+    }
+    lastErr = new Error(`Ошибка сервера ${res.status}${text ? ": " + text.slice(0, 200) : ""}`);
+    if (res.status < 500 && res.status !== 408 && res.status !== 429) break;
   }
+  if (lastErr && lastErr.network) setNet(false);
+  throw lastErr || new Error("Неизвестная ошибка");
 }
 
-const todayStr    = () => new Date().toISOString().slice(0, 10);
-const tomorrowStr = () => { const d = new Date(); d.setDate(d.getDate()+1); return d.toISOString().slice(0,10); };
-const calcHours   = (f, t) => { if (!f||!t) return 0; const [fh,fm]=f.split(":").map(Number),[th,tm]=t.split(":").map(Number),m=(th*60+tm)-(fh*60+fm); return m>0?(m/60).toFixed(1):0; };
-const fmtDate     = d => { const [y,m,day]=d.split("-"); return `${day}.${m}.${y}`; };
-const MONTHS      = ["Январь","Февраль","Март","Апрель","Май","Июнь","Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
+/* --- демо-режим (только для предпросмотра, база не затрагивается) --- */
+const DEMO_KEY = "m5_demo_rows_v2";
+let demoRows = null;
+function demoSeed() {
+  const t = todayStr(), y = addDays(t, -1), tm = addDays(t, 1);
+  const rows = {};
+  const add = (date, driverId, machineId, time, place, org, note, rep) => {
+    const id = "req_demo" + newId();
+    rows[id] = { date, month: monthOf(date), driverId, machineId, time, place, org, note, createdBy: 1, createdAt: new Date().toISOString() };
+    if (rep) rows["rep_" + id] = { reqId: id, date, month: monthOf(date), driverId, machineId, ...rep, hours: calcHours(rep.from, rep.to), done: true, savedBy: driverId, savedAt: new Date().toISOString() };
+  };
+  add(y, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40", { from: "08:00", to: "17:30", trips: 6, route: "Карьер → Линейная", comment: "", waybill: true });
+  add(y, 6, 14, "09:00", "ул. Каслинская, 5", "ИП Петров", "Разгрузка плит", null);
+  add(t, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40", { from: "08:00", to: "16:00", trips: 5, route: "Карьер → Линейная", comment: "", waybill: true });
+  add(t, 4, 8, "09:00", "Склад, Свердловский тракт, 12", "ООО «УралСнаб»", "Кран на 4 часа", null);
+  add(t, 5, 10, "07:30", "п. Терема", "ИП Колдаева", "", null);
+  add(tm, 3, 2, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "", null);
+  add(tm, 7, 5, "10:00", "ул. Труда, 160", "ООО «Альфа»", "Манипулятор, 2 точки", null);
+  return rows;
+}
+function demoDb() {
+  if (demoRows) return demoRows;
+  let saved = null;
+  try { saved = JSON.parse(lsGet(DEMO_KEY) || "null"); } catch {}
+  demoRows = saved || demoSeed();
+  return demoRows;
+}
+const demoSave = () => lsSet(DEMO_KEY, JSON.stringify(demoRows));
 
+const api = {
+  async rowsWhere(field, value) {
+    if (isDemo()) {
+      await sleep(200);
+      return Object.entries(demoDb())
+        .filter(([id, d]) => d && d[field] === value && (id.startsWith("req_") || id.startsWith("rep_")))
+        .map(([id, data]) => ({ id, data: clone(data) }));
+    }
+    const rows = await sbFetch(`${TABLE}?select=id,data&data->>${field}=eq.${encodeURIComponent(value)}`);
+    return Array.isArray(rows) ? rows : [];
+  },
+  byDate(date) { return api.rowsWhere("date", date); },
+  byMonth(ym) { return api.rowsWhere("month", ym); },
+  async put(id, data) {
+    if (isDemo()) { await sleep(300); demoDb()[id] = clone(data); demoSave(); return; }
+    await sbFetch(TABLE, {
+      method: "POST",
+      prefer: "resolution=merge-duplicates,return=minimal",
+      body: [{ id, data, updated_at: new Date().toISOString() }],
+    });
+  },
+  async del(id) {
+    if (isDemo()) { await sleep(200); delete demoDb()[id]; demoSave(); return; }
+    await sbFetch(`${TABLE}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
+  },
+  async getCfg() {
+    let rows;
+    if (isDemo()) {
+      const db = demoDb();
+      rows = ["cfg_machines", "cfg_blocked"].filter(k => db[k]).map(k => ({ id: k, data: clone(db[k]) }));
+    } else {
+      rows = await sbFetch(`${TABLE}?select=id,data&id=in.(cfg_machines,cfg_blocked)`);
+    }
+    const cfg = emptyCfg();
+    (rows || []).forEach(r => {
+      if (r.id === "cfg_machines" && r.data) cfg.machines = { repair: r.data.repair || {}, extra: r.data.extra || [] };
+      if (r.id === "cfg_blocked" && r.data) cfg.blocked = { ids: r.data.ids || [] };
+    });
+    return cfg;
+  },
+};
+const emptyCfg = () => ({ machines: { repair: {}, extra: [] }, blocked: { ids: [] } });
+
+function splitRows(rows) {
+  const reqs = [], reps = {};
+  (rows || []).forEach(r => {
+    if (!r || !r.data || !r.id) return;
+    if (r.id.startsWith("req_")) reqs.push({ ...r.data, id: r.id });
+    else if (r.id.startsWith("rep_") && r.data.reqId) reps[r.data.reqId] = { ...r.data, id: r.id };
+  });
+  return { reqs, reps };
+}
+
+// Загрузка заявок и отчётов за день или месяц + автообновление.
+// Формы хранят свои данные отдельно, поэтому обновление их не стирает.
+function useRows(kind, key, pollMs) {
+  const [state, setState] = useState({ reqs: [], reps: {}, loading: true, error: "", key: null });
+  const seq = useRef(0);
+  const load = useCallback(async (silent) => {
+    const my = ++seq.current;
+    if (!silent) setState(s => ({ ...s, loading: true, error: "" }));
+    try {
+      const rows = kind === "date" ? await api.byDate(key) : await api.byMonth(key);
+      if (my !== seq.current) return; // пришёл устаревший ответ — игнорируем
+      const { reqs, reps } = splitRows(rows);
+      setState({ reqs, reps, loading: false, error: "", key });
+    } catch (e) {
+      if (my !== seq.current) return;
+      setState(s => ({ ...s, loading: false, error: e.message }));
+    }
+  }, [kind, key]);
+  useEffect(() => {
+    setState({ reqs: [], reps: {}, loading: true, error: "", key: null });
+    load(false);
+    const t = setInterval(() => { if (document.visibilityState === "visible") load(true); }, pollMs || 20000);
+    const onVis = () => { if (document.visibilityState === "visible") load(true); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
+  }, [load, pollMs]);
+  // после сохранения: сразу показываем изменение и перечитываем базу
+  const applyLocal = useCallback((fn) => {
+    seq.current++;
+    setState(s => { const n = { ...s, reps: { ...s.reps }, reqs: [...s.reqs] }; fn(n); return n; });
+    load(true);
+  }, [load]);
+  return { ...state, reload: load, applyLocal };
+}
+
+function useSaver() {
+  const [s, setS] = useState({ busy: false, error: "", ok: false });
+  const run = async (fn) => {
+    setS({ busy: true, error: "", ok: false });
+    try {
+      await fn();
+      setS({ busy: false, error: "", ok: true });
+      setTimeout(() => setS(x => (x.busy ? x : { ...x, ok: false })), 2500);
+      return true;
+    } catch (e) {
+      setS({ busy: false, error: (e && e.message) || String(e), ok: false });
+      return false;
+    }
+  };
+  return [s, run];
+}
+
+/* ---------------- стили ---------------- */
+const C = {
+  blue: "#2d6a9f", dark: "#1e3a5f", green: "#27ae60", greenBg: "#e6f6ec", greenBorder: "#9fd8b4",
+  red: "#e74c3c", redBg: "#fdecea", orange: "#e67e22", orangeBg: "#fef3e2", gray: "#6b7b8c",
+  bg: "#f0f4f8", border: "#d9e1ea", purple: "#8e44ad", purpleBg: "#f3e9fb", blueBg: "#e8f1fa",
+};
 const S = {
-  page:   { fontFamily:"sans-serif", minHeight:"100vh", background:"#f0f4f8" },
-  header: { background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", color:"#fff", padding:"14px 18px", display:"flex", justifyContent:"space-between", alignItems:"center" },
-  card:   { background:"#fff", borderRadius:12, padding:14, marginBottom:10, boxShadow:"0 2px 8px rgba(0,0,0,0.07)" },
-  input:  { padding:"7px 10px", borderRadius:8, border:"1px solid #ddd", fontSize:14, boxSizing:"border-box" },
-  select: { padding:"7px 10px", borderRadius:8, border:"1px solid #ddd", fontSize:14, boxSizing:"border-box", background:"#fff" },
-  btn:    (c="#2d6a9f") => ({ background:c, color:"#fff", border:"none", borderRadius:8, padding:"7px 14px", cursor:"pointer", fontWeight:600, fontSize:13 }),
-  tag:    (c) => ({ borderRadius:20, padding:"3px 10px", fontSize:12, ...c }),
+  page: { fontFamily: "-apple-system, 'Segoe UI', Roboto, Arial, sans-serif", minHeight: "100vh", background: C.bg, color: "#1d2733" },
+  wrap: { maxWidth: 780, margin: "0 auto", padding: "12px 12px 80px" },
+  header: { background: `linear-gradient(135deg, ${C.dark}, ${C.blue})`, color: "#fff", padding: "12px 16px" },
+  card: { background: "#fff", borderRadius: 12, padding: 14, marginBottom: 10, boxShadow: "0 1px 6px rgba(0,0,0,0.07)" },
+  input: { width: "100%", padding: "10px 11px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 16, boxSizing: "border-box", background: "#fff", color: "#1d2733", fontFamily: "inherit" },
+  label: { fontSize: 12, color: C.gray, marginBottom: 4, display: "block", fontWeight: 600 },
+  btn: (bg = C.blue, extra = {}) => ({ background: bg, color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", cursor: "pointer", fontWeight: 700, fontSize: 15, fontFamily: "inherit", ...extra }),
+  ghost: (extra = {}) => ({ background: "#fff", color: C.blue, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 12px", cursor: "pointer", fontWeight: 600, fontSize: 13, fontFamily: "inherit", ...extra }),
+  tag: (bg, color) => ({ display: "inline-block", borderRadius: 20, padding: "3px 10px", fontSize: 12.5, background: bg, color, marginRight: 6, marginTop: 5, lineHeight: 1.4 }),
+  grid2: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 },
+  h2: { fontSize: 17, fontWeight: 700, margin: "4px 0 10px" },
+  muted: { color: C.gray, fontSize: 13 },
 };
 
-export default function App() {
-  const [data, setData]         = useState(blankData);
-  const [loaded, setLoaded]     = useState(false);
-  const [saveStatus, setSaveStatus] = useState(""); // "", "saving", "saved", "error"
-  const [currentUser, setCurrentUser] = useState(null);
-  const [loginName, setLoginName] = useState("");
-  const [loginPin,  setLoginPin]  = useState("");
-  const [loginErr,  setLoginErr]  = useState("");
-  const [tab,       setTab]       = useState("plan");
-  const [selDate,   setSelDate]   = useState(tomorrowStr());
-  const [newReq,    setNewReq]    = useState({ title:"", machineId:"", assignedTo:"" });
-  const [newTask,   setNewTask]   = useState({ title:"", assignedTo:"", machineId:"", date:tomorrowStr(), time:"" });
-  const [newMachine,setNewMachine]= useState("");
-  const [manTab,    setManTab]    = useState("overview");
-  const [manDate,   setManDate]   = useState(todayStr());
-  const [todayDate, setTodayDate] = useState(todayStr());
-  const [repYear,   setRepYear]   = useState(new Date().getFullYear());
-  const [repMonth,  setRepMonth]  = useState(new Date().getMonth()+1);
-  const [repSub,    setRepSub]    = useState("machines");
-  const [ovMode,    setOvMode]    = useState("day");
+/* ---------------- мелкие компоненты ---------------- */
+function Field({ label, children }) {
+  return <label style={{ display: "block" }}><span style={S.label}>{label}</span>{children}</label>;
+}
 
-  const dataRef    = useRef(data);
-  const pendingSave = useRef(false);
-  dataRef.current  = data;
+function SaveNote({ s }) {
+  if (s.error) return <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: C.redBg, color: C.red, fontSize: 13 }}>❌ Не сохранено. {s.error}</div>;
+  if (s.ok) return <div style={{ marginTop: 8, color: C.green, fontSize: 13, fontWeight: 600 }}>✅ Сохранено</div>;
+  return null;
+}
 
-  useEffect(() => {
-    loadData().then(d => { if (d) setData(d); setLoaded(true); });
-  }, []);
+function DateBar({ date, setDate }) {
+  const t = todayStr();
+  const quick = [[addDays(t, -1), "Вчера"], [t, "Сегодня"], [addDays(t, 1), "Завтра"]];
+  return (
+    <div style={{ ...S.card, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", padding: 10 }}>
+      <button style={S.ghost()} onClick={() => setDate(addDays(date, -1))} aria-label="Предыдущий день">◀</button>
+      {quick.map(([d, l]) => (
+        <button key={l} onClick={() => setDate(d)}
+          style={date === d ? S.btn(C.blue, { padding: "8px 12px", fontSize: 13 }) : S.ghost()}>{l}</button>
+      ))}
+      <button style={S.ghost()} onClick={() => setDate(addDays(date, 1))} aria-label="Следующий день">▶</button>
+      <input type="date" value={date} onChange={e => e.target.value && setDate(e.target.value)}
+        style={{ ...S.input, width: "auto", flex: "1 1 150px", padding: "7px 10px", fontSize: 15 }} />
+      <div style={{ width: "100%", fontWeight: 700, color: C.dark, fontSize: 15 }}>📅 {fmtDay(date)}{date === t ? " — сегодня" : date === addDays(t, 1) ? " — завтра" : ""}</div>
+    </div>
+  );
+}
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      if (!pendingSave.current) loadData().then(d => { if (d) setData(d); });
-    }, 5000);
-    return () => clearInterval(id);
-  }, []);
+/* ---------------- форма заявки ---------------- */
+function ReqForm({ initial, date, drivers, machines, repair, dayReqs, lockDriver, onSubmit, onCancel, submitLabel }) {
+  const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: "", time: "08:00", place: "", org: "", note: "" });
+  const [s, run] = useSaver();
+  const [err, setErr] = useState("");
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const busyMachine = f.machineId && (dayReqs || []).find(r => Number(r.machineId) === Number(f.machineId) && r.id !== f.id && r.date === f.date);
+  const busyDriver = f.driverId && (dayReqs || []).find(r => Number(r.driverId) === Number(f.driverId) && r.id !== f.id && r.date === f.date);
 
-  const upd = fn => {
-    pendingSave.current = true;
-    setSaveStatus("");
-    setData(prev => {
-      const d = JSON.parse(JSON.stringify(prev));
-      fn(d);
-      dataRef.current = d;
-      return d;
+  const submit = async () => {
+    if (!f.driverId) return setErr("Выберите водителя");
+    if (!f.place.trim() && !f.org.trim()) return setErr("Укажите, куда ехать или заказчика");
+    setErr("");
+    const ok = await run(() => onSubmit({ ...f, driverId: Number(f.driverId), machineId: f.machineId ? Number(f.machineId) : null, place: f.place.trim(), org: f.org.trim(), note: f.note.trim() }));
+    if (ok && !initial) setF(x => ({ ...x, place: "", org: "", note: "", machineId: "", driverId: lockDriver || "" }));
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={S.grid2}>
+        {!lockDriver && (
+          <Field label="Водитель *">
+            <select style={S.input} value={f.driverId} onChange={e => set("driverId", e.target.value)}>
+              <option value="">— выберите —</option>
+              {drivers.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Техника">
+          <select style={S.input} value={f.machineId || ""} onChange={e => set("machineId", e.target.value)}>
+            <option value="">— без техники —</option>
+            {machines.map(m => <option key={m.id} value={m.id} disabled={!!repair[m.id]}>{m.name}{repair[m.id] ? " (в ремонте)" : ""}</option>)}
+          </select>
+        </Field>
+        <Field label="Время подачи">
+          <input type="time" style={S.input} value={f.time} onChange={e => set("time", e.target.value)} />
+        </Field>
+        {initial && (
+          <Field label="Дата">
+            <input type="date" style={S.input} value={f.date} onChange={e => e.target.value && set("date", e.target.value)} />
+          </Field>
+        )}
+      </div>
+      <Field label="Куда / объект">
+        <input style={S.input} value={f.place} onChange={e => set("place", e.target.value)} placeholder="Адрес или название объекта" />
+      </Field>
+      <Field label="Заказчик">
+        <input style={S.input} value={f.org} onChange={e => set("org", e.target.value)} placeholder="Организация" />
+      </Field>
+      <Field label="Комментарий для водителя">
+        <input style={S.input} value={f.note} onChange={e => set("note", e.target.value)} placeholder="Что везти, контакт на месте…" />
+      </Field>
+      {busyMachine && <div style={{ ...S.muted, color: C.orange }}>⚠️ Эта техника на эту дату уже стоит в плане: {shortName(busyMachine.driverId)}, {busyMachine.time || "время не указано"}</div>}
+      {busyDriver && !lockDriver && <div style={{ ...S.muted, color: C.orange }}>ℹ️ У водителя на эту дату уже есть заявка ({busyDriver.time || "без времени"}, {busyDriver.place || busyDriver.org})</div>}
+      {err && <div style={{ color: C.red, fontSize: 13 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button style={S.btn(C.blue, { flex: "1 1 200px", opacity: s.busy ? 0.7 : 1 })} disabled={s.busy} onClick={submit}>
+          {s.busy ? "⏳ Сохраняем…" : submitLabel || "💾 Сохранить"}
+        </button>
+        {onCancel && <button style={S.ghost({ padding: "11px 16px" })} onClick={onCancel}>Отмена</button>}
+      </div>
+      <SaveNote s={s} />
+    </div>
+  );
+}
+
+/* ---------------- форма отчёта водителя ---------------- */
+function ReportForm({ req, rep, onSubmit, onCancel }) {
+  const [f, setF] = useState(() => ({
+    from: rep?.from || req.time || "", to: rep?.to || "", trips: rep?.trips ?? "",
+    route: rep?.route || "", comment: rep?.comment || "", waybill: rep ? !!rep.waybill : false,
+  }));
+  const [s, run] = useSaver();
+  const [err, setErr] = useState("");
+  const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const hours = calcHours(f.from, f.to);
+
+  const submit = async () => {
+    if (!f.from || !f.to) return setErr("Укажите время работы: с какого и до какого часа");
+    setErr("");
+    await run(() => onSubmit({ ...f, trips: f.trips === "" ? 0 : Number(f.trips), hours, route: f.route.trim(), comment: f.comment.trim() }));
+  };
+
+  return (
+    <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "#f7fbf8", border: `1px solid ${C.greenBorder}`, display: "grid", gap: 10 }}>
+      <div style={{ fontWeight: 700, color: C.green }}>📝 Отчёт о выполненной работе</div>
+      <div style={S.grid2}>
+        <Field label="Работал с *"><input type="time" style={S.input} value={f.from} onChange={e => set("from", e.target.value)} /></Field>
+        <Field label="до *"><input type="time" style={S.input} value={f.to} onChange={e => set("to", e.target.value)} /></Field>
+        <Field label="Рейсов"><input type="number" inputMode="numeric" min="0" style={S.input} value={f.trips} onChange={e => set("trips", e.target.value)} placeholder="0" /></Field>
+      </div>
+      {hours > 0 && <div style={{ fontSize: 14, color: C.dark }}>Итого: <b>{hours} ч</b></div>}
+      <Field label="Маршрут / что делал">
+        <input style={S.input} value={f.route} onChange={e => set("route", e.target.value)} placeholder="Например: Карьер → ул. Линейная" />
+      </Field>
+      <Field label="Комментарий">
+        <input style={S.input} value={f.comment} onChange={e => set("comment", e.target.value)} placeholder="Простой, поломка, доп. работы…" />
+      </Field>
+      <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 15, cursor: "pointer", padding: "4px 0" }}>
+        <input type="checkbox" checked={f.waybill} onChange={e => set("waybill", e.target.checked)} style={{ width: 22, height: 22 }} />
+        Путевой лист закрыт
+      </label>
+      {err && <div style={{ color: C.red, fontSize: 13 }}>{err}</div>}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button style={S.btn(C.green, { flex: "1 1 220px", opacity: s.busy ? 0.7 : 1 })} disabled={s.busy} onClick={submit}>
+          {s.busy ? "⏳ Сохраняем…" : "✅ Работа выполнена — сохранить"}
+        </button>
+        {onCancel && <button style={S.ghost({ padding: "11px 16px" })} onClick={onCancel}>Отмена</button>}
+      </div>
+      <SaveNote s={s} />
+    </div>
+  );
+}
+
+/* ---------------- карточка заявки ---------------- */
+function ReqCard({ req, rep, machines, repair, drivers, dayReqs, me, canEditPlan, onSaveReq, onDeleteReq, onSaveRep, onDeleteRep }) {
+  const [mode, setMode] = useState("view"); // view | edit | report
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [s, run] = useSaver();
+  const t = todayStr();
+  const done = !!(rep && rep.done);
+  const missing = !done && req.date < t;
+  const canReport = req.date <= t && (canEditPlan || Number(req.driverId) === me.id);
+  const machine = machines.find(m => m.id === Number(req.machineId));
+
+  const border = done ? C.green : missing ? C.orange : C.blue;
+  const cardStyle = { ...S.card, borderLeft: `6px solid ${border}`, background: done ? C.greenBg : "#fff" };
+
+  if (mode === "edit") {
+    return (
+      <div style={cardStyle}>
+        <div style={{ ...S.h2, fontSize: 15 }}>✏️ Изменить заявку</div>
+        <ReqForm initial={req} date={req.date} drivers={drivers} machines={machines} repair={repair} dayReqs={dayReqs}
+          submitLabel="💾 Сохранить изменения"
+          onSubmit={async (f) => { await onSaveReq(f); setMode("view"); }}
+          onCancel={() => setMode("view")} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={cardStyle} data-testid="req-card">
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>
+            {req.time ? <span style={{ color: C.dark }}>🕗 {req.time} · </span> : null}{userName(req.driverId)}
+          </div>
+          <div style={{ fontSize: 14, marginTop: 4, color: "#33414f" }}>🚜 {machine ? machine.name : "без техники"}</div>
+        </div>
+        <span style={{ ...S.tag(done ? C.green : missing ? C.orangeBg : C.blueBg, done ? "#fff" : missing ? C.orange : C.blue), marginTop: 0, whiteSpace: "nowrap", fontWeight: 700 }}>
+          {done ? "✅ Отработано" : missing ? "⚠️ Нет отчёта" : "⏳ В плане"}
+        </span>
+      </div>
+      <div style={{ marginTop: 6, fontSize: 14, lineHeight: 1.5 }}>
+        {req.place && <div>📍 {req.place}</div>}
+        {req.org && <div>🏢 {req.org}</div>}
+        {req.note && <div style={{ color: C.gray }}>💬 {req.note}</div>}
+        {Number(req.createdBy) === Number(req.driverId) && <div style={{ ...S.muted, fontSize: 12 }}>добавлено водителем</div>}
+      </div>
+
+      {done && mode !== "report" && (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.greenBorder}` }}>
+          <span style={S.tag("#fff", C.dark)}>🕐 {rep.from}–{rep.to} · <b>{rep.hours} ч</b></span>
+          {Number(rep.trips) > 0 && <span style={S.tag(C.orangeBg, C.orange)}>🚗 {rep.trips} рейс.</span>}
+          {rep.route && <span style={S.tag(C.blueBg, C.blue)}>🛣 {rep.route}</span>}
+          <span style={S.tag(rep.waybill ? "#fff" : C.redBg, rep.waybill ? C.green : C.red)}>{rep.waybill ? "📄 Путевой закрыт" : "📄 Путевой НЕ закрыт"}</span>
+          {rep.comment && <div style={{ fontSize: 13, color: C.gray, marginTop: 6 }}>💬 {rep.comment}</div>}
+          {Number(rep.savedBy) !== Number(req.driverId) && rep.savedBy && <div style={{ ...S.muted, fontSize: 12, marginTop: 4 }}>отчёт внёс: {shortName(rep.savedBy)}</div>}
+        </div>
+      )}
+
+      {mode === "report" && (
+        <ReportForm req={req} rep={rep}
+          onSubmit={async (f) => { await onSaveRep(req, f); setMode("view"); }}
+          onCancel={() => setMode("view")} />
+      )}
+
+      {mode === "view" && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+          {canReport && !done && (
+            <button style={S.btn(C.green, { flex: "1 1 220px" })} onClick={() => setMode("report")}>✅ Отработал — заполнить отчёт</button>
+          )}
+          {canReport && done && <button style={S.ghost()} onClick={() => setMode("report")}>✏️ Изменить отчёт</button>}
+          {canEditPlan && done && <button style={S.ghost({ color: C.orange })} disabled={s.busy} onClick={() => run(() => onDeleteRep(req))}>↩️ Снять отметку</button>}
+          {canEditPlan && !done && <button style={S.ghost()} onClick={() => setMode("edit")}>✏️ Изменить</button>}
+          {canEditPlan && !confirmDel && <button style={S.ghost({ color: C.red })} onClick={() => setConfirmDel(true)}>🗑</button>}
+          {canEditPlan && confirmDel && (
+            <>
+              <button style={S.btn(C.red, { padding: "8px 12px", fontSize: 13 })} disabled={s.busy} onClick={() => run(() => onDeleteReq(req))}>Да, удалить</button>
+              <button style={S.ghost()} onClick={() => setConfirmDel(false)}>Нет</button>
+            </>
+          )}
+          {!canReport && !done && req.date > t && Number(req.driverId) === me.id && (
+            <div style={{ ...S.muted, fontSize: 12 }}>Отчёт можно заполнить в день работы</div>
+          )}
+        </div>
+      )}
+      <SaveNote s={s} />
+    </div>
+  );
+}
+
+/* ---------------- план (общий для менеджера и водителя) ---------------- */
+function PlanView({ me, machines, repair, blockedIds, isDriver }) {
+  const [date, setDate] = useState(isDriver ? todayStr() : addDays(todayStr(), 1));
+  const day = useRows("date", date, 20000);
+  const [showForm, setShowForm] = useState(false);
+  const drivers = USERS.filter(u => u.role === "driver" && !blockedIds.includes(u.id)).sort((a, b) => a.name.localeCompare(b.name, "ru"));
+
+  const list = (isDriver ? day.reqs.filter(r => Number(r.driverId) === me.id) : day.reqs)
+    .slice()
+    .sort((a, b) => (a.time || "99").localeCompare(b.time || "99") || userName(a.driverId).localeCompare(userName(b.driverId), "ru"));
+
+  const saveReq = async (f) => {
+    const isNew = !f.id;
+    const id = f.id || "req_" + newId();
+    const old = day.reqs.find(r => r.id === id);
+    const data = {
+      date: f.date || date, month: monthOf(f.date || date),
+      driverId: f.driverId, machineId: f.machineId, time: f.time || "",
+      place: f.place, org: f.org, note: f.note,
+      createdBy: old ? old.createdBy : me.id, createdAt: old ? old.createdAt : new Date().toISOString(),
+      updatedBy: me.id, updatedAt: new Date().toISOString(),
+    };
+    await api.put(id, data);
+    // если у заявки уже есть отчёт и поменяли дату/водителя — переносим отчёт вместе с ней
+    const rep = day.reps[id];
+    if (!isNew && rep && (rep.date !== data.date || Number(rep.driverId) !== Number(data.driverId))) {
+      const { id: repId, ...repData } = rep;
+      await api.put(repId, { ...repData, date: data.date, month: data.month, driverId: data.driverId, machineId: data.machineId });
+    }
+    day.applyLocal(st => {
+      st.reqs = st.reqs.filter(r => r.id !== id);
+      if (data.date === date) st.reqs.push({ ...data, id });
     });
   };
 
-  const [saveError, setSaveError] = useState("");
-
-  const handleSave = async () => {
-    setSaveStatus("saving");
-    setSaveError("");
-    try {
-      await saveData(dataRef.current);
-      setSaveStatus("saved");
-      pendingSave.current = false;
-      setTimeout(() => setSaveStatus(""), 2000);
-    } catch(e) {
-      setSaveStatus("error");
-      setSaveError(e?.message || "Неизвестная ошибка");
-    }
+  const deleteReq = async (req) => {
+    if (day.reps[req.id]) await api.del("rep_" + req.id);
+    await api.del(req.id);
+    day.applyLocal(st => { st.reqs = st.reqs.filter(r => r.id !== req.id); delete st.reps[req.id]; });
   };
 
-  const SaveBtn = () => (
+  const saveRep = async (req, f) => {
+    const id = "rep_" + req.id;
+    const data = {
+      reqId: req.id, date: req.date, month: monthOf(req.date), driverId: Number(req.driverId), machineId: req.machineId,
+      from: f.from, to: f.to, hours: f.hours, trips: f.trips, route: f.route, comment: f.comment, waybill: !!f.waybill,
+      done: true, savedBy: me.id, savedAt: new Date().toISOString(),
+    };
+    await api.put(id, data);
+    day.applyLocal(st => { st.reps[req.id] = { ...data, id }; });
+  };
+
+  const deleteRep = async (req) => {
+    await api.del("rep_" + req.id);
+    day.applyLocal(st => { delete st.reps[req.id]; });
+  };
+
+  const doneCnt = list.filter(r => day.reps[r.id]?.done).length;
+  const t = todayStr();
+  const missingCnt = date < t ? list.length - doneCnt : 0;
+  const busyMachineIds = new Set(day.reqs.map(r => Number(r.machineId)).filter(Boolean));
+  const freeMachines = machines.filter(m => !busyMachineIds.has(m.id) && !repair[m.id]);
+  const busyDriverIds = new Set(day.reqs.map(r => Number(r.driverId)));
+  const freeDrivers = drivers.filter(d => !busyDriverIds.has(d.id));
+
+  return (
     <div>
-      <button onClick={handleSave} disabled={saveStatus==="saving"} style={{
-        ...S.btn(saveStatus==="saved"?"#27ae60":saveStatus==="error"?"#e74c3c":"#2d6a9f"),
-        width:"100%", padding:11, fontSize:15, marginTop:8,
-        opacity: saveStatus==="saving" ? 0.7 : 1
-      }}>
-        {saveStatus==="saving" ? "⏳ Сохраняем..." : saveStatus==="saved" ? "✅ Сохранено!" : saveStatus==="error" ? "❌ Ошибка, попробуйте ещё раз" : "💾 Сохранить"}
-      </button>
-      {saveStatus==="error" && saveError && (
-        <div style={{fontSize:11,color:"#e74c3c",marginTop:4,padding:"4px 8px",background:"#fdecea",borderRadius:6}}>
-          {saveError}
+      <DateBar date={date} setDate={d => { setDate(d); setShowForm(false); }} />
+
+      {day.error && (
+        <div style={{ ...S.card, background: C.redBg, color: C.red, fontSize: 14 }}>
+          ⚠️ {day.error} <button style={S.ghost({ marginLeft: 8 })} onClick={() => day.reload(false)}>Обновить</button>
+        </div>
+      )}
+
+      {!isDriver && (
+        <div style={{ ...S.card, display: "flex", justifyContent: "space-around", textAlign: "center", padding: 10 }}>
+          <div><div style={{ fontSize: 22, fontWeight: 800, color: C.blue }}>{list.length}</div><div style={S.muted}>заявок</div></div>
+          <div><div style={{ fontSize: 22, fontWeight: 800, color: C.green }}>{doneCnt}</div><div style={S.muted}>отработано</div></div>
+          <div><div style={{ fontSize: 22, fontWeight: 800, color: missingCnt ? C.orange : C.gray }}>{date < t ? missingCnt : list.length - doneCnt}</div><div style={S.muted}>{date < t ? "без отчёта" : "в работе"}</div></div>
+        </div>
+      )}
+
+      {!showForm && (
+        <button style={S.btn(isDriver ? "#fff" : C.blue, { width: "100%", marginBottom: 10, ...(isDriver ? { color: C.blue, border: `1px dashed ${C.blue}`, fontSize: 14 } : {}) })}
+          onClick={() => setShowForm(true)}>
+          {isDriver ? "➕ Добавить работу без заявки" : "➕ Добавить заявку на " + fmtDay(date)}
+        </button>
+      )}
+      {showForm && (
+        <div style={S.card}>
+          <div style={S.h2}>{isDriver ? "➕ Работа без заявки" : "➕ Новая заявка"} · {fmtDay(date)}</div>
+          <ReqForm date={date} drivers={drivers} machines={machines} repair={repair} dayReqs={day.reqs}
+            lockDriver={isDriver ? me.id : null}
+            submitLabel={isDriver ? "💾 Добавить" : "💾 Добавить в план"}
+            onSubmit={saveReq} onCancel={() => setShowForm(false)} />
+        </div>
+      )}
+
+      {day.loading && day.key !== date ? (
+        <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div>
+      ) : list.length === 0 ? (
+        <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>
+          {isDriver ? "На этот день заявок нет" : "На этот день заявок пока нет"}
+        </div>
+      ) : (
+        list.map(r => (
+          <ReqCard key={r.id} req={r} rep={day.reps[r.id]} me={me}
+            machines={machines} repair={repair} drivers={drivers} dayReqs={day.reqs}
+            canEditPlan={!isDriver || Number(r.createdBy) === me.id}
+            onSaveReq={saveReq} onDeleteReq={deleteReq} onSaveRep={saveRep} onDeleteRep={deleteRep} />
+        ))
+      )}
+
+      {!isDriver && !day.loading && (
+        <div style={S.card}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>🟢 Свободная техника ({freeMachines.length})</div>
+          <div>{freeMachines.length ? freeMachines.map(m => <span key={m.id} style={S.tag(C.greenBg, C.green)}>{m.name}</span>) : <span style={S.muted}>вся техника в плане</span>}</div>
+          <div style={{ fontWeight: 700, fontSize: 14, margin: "12px 0 4px" }}>👤 Водители без заявок ({freeDrivers.length})</div>
+          <div>{freeDrivers.length ? freeDrivers.map(d => <span key={d.id} style={S.tag(C.blueBg, C.blue)}>{shortName(d.id)}</span>) : <span style={S.muted}>все водители в плане</span>}</div>
+          {Object.keys(repair).filter(k => repair[k]).length > 0 && (
+            <>
+              <div style={{ fontWeight: 700, fontSize: 14, margin: "12px 0 4px" }}>🔧 В ремонте</div>
+              <div>{machines.filter(m => repair[m.id]).map(m => <span key={m.id} style={S.tag(C.redBg, C.red)}>{m.name}</span>)}</div>
+            </>
+          )}
         </div>
       )}
     </div>
   );
+}
 
-  const isPastDate = (date) => currentUser?.role === "driver" && date < todayStr();
-  const canAddReq  = (u) => u && (u.role === "manager" || u.role === "supervisor");
-  const monthDays  = (y, m) => Array.from({length: new Date(y, m, 0).getDate()}, (_,i) => `${y}-${String(m).padStart(2,"0")}-${String(i+1).padStart(2,"0")}`);
+/* ---------------- отчёт за месяц ---------------- */
+function ReportView({ machines }) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [mode, setMode] = useState("drivers");
+  const [open, setOpen] = useState({});
+  const ym = `${year}-${pad(month)}`;
+  const data = useRows("month", ym, 60000);
 
-  const getReqsForDateByEmployee = (empId, date) => {
-    const result = [];
-    data.users.forEach(u => {
-      (data.requests[u.id]?.[date] || []).forEach(r => {
-        const assigned = r.assignedTo ? Number(r.assignedTo) : u.id;
-        if (assigned === empId) result.push({ ...r, _creatorId: u.id, _mine: u.id === empId });
-      });
-    });
-    data.tasks.filter(t => Number(t.assignedTo) === empId && t.date === date)
-      .forEach(t => result.push({ ...t, _type:"task", _mine:false }));
-    return result;
+  const rows = data.reqs.map(r => ({ req: r, rep: data.reps[r.id] }))
+    .sort((a, b) => a.req.date.localeCompare(b.req.date) || (a.req.time || "").localeCompare(b.req.time || ""));
+  const t = todayStr();
+  const done = rows.filter(x => x.rep?.done);
+  const missing = rows.filter(x => !x.rep?.done && x.req.date < t);
+  const totalHours = Math.round(done.reduce((s, x) => s + Number(x.rep.hours || 0), 0) * 10) / 10;
+  const totalTrips = done.reduce((s, x) => s + Number(x.rep.trips || 0), 0);
+  const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "без техники";
+
+  const groupBy = (keyFn) => {
+    const g = {};
+    rows.forEach(x => { const k = keyFn(x); (g[k] = g[k] || []).push(x); });
+    return Object.entries(g).map(([k, items]) => {
+      const d = items.filter(x => x.rep?.done);
+      return {
+        key: k, items,
+        days: new Set(d.map(x => x.req.date)).size,
+        shifts: d.length,
+        hours: Math.round(d.reduce((s, x) => s + Number(x.rep.hours || 0), 0) * 10) / 10,
+        trips: d.reduce((s, x) => s + Number(x.rep.trips || 0), 0),
+        missing: items.filter(x => !x.rep?.done && x.req.date < t).length,
+        noWaybill: d.filter(x => !x.rep.waybill).length,
+      };
+    }).sort((a, b) => b.hours - a.hours);
   };
+  const groups = mode === "drivers"
+    ? groupBy(x => String(x.req.driverId)).map(g => ({ ...g, title: userName(g.key) }))
+    : groupBy(x => String(x.req.machineId || 0)).map(g => ({ ...g, title: g.key === "0" ? "Без техники" : mName(g.key) }));
 
-  const getAllReqsForDate = (date) => {
-    const result = [];
-    data.users.forEach(u => {
-      (data.requests[u.id]?.[date] || []).forEach(r => result.push({ ...r, userId: u.id, userName: u.name }));
-    });
-    return result;
+  const csvCell = v => { const s = v === undefined || v === null ? "" : String(v); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const downloadCsv = () => {
+    const head = ["Дата", "Водитель", "Техника", "Время подачи", "Объект", "Заказчик", "Статус", "С", "До", "Часы", "Рейсы", "Маршрут", "Путевой закрыт", "Комментарий водителя"];
+    const lines = rows.map(({ req, rep }) => [
+      fmtDate(req.date), userName(req.driverId), mName(req.machineId), req.time, req.place, req.org,
+      rep?.done ? "Отработано" : req.date < t ? "Нет отчёта" : "В плане",
+      rep?.from, rep?.to, rep?.hours ? String(rep.hours).replace(".", ",") : "", rep?.trips, rep?.route,
+      rep?.done ? (rep.waybill ? "да" : "нет") : "", rep?.comment,
+    ].map(csvCell).join(";"));
+    const csv = "﻿" + [head.join(";"), ...lines].join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `Отчёт_М5_${MONTHS[month - 1]}_${year}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   };
-
-  const addRequest = () => {
-    if (!newReq.title.trim()) return;
-    upd(d => {
-      if (!d.requests[currentUser.id]) d.requests[currentUser.id] = {};
-      if (!d.requests[currentUser.id][selDate]) d.requests[currentUser.id][selDate] = [];
-      d.requests[currentUser.id][selDate].push({
-        id: Date.now(), title: newReq.title,
-        machineId: newReq.machineId ? Number(newReq.machineId) : null,
-        assignedTo: newReq.assignedTo ? Number(newReq.assignedTo) : currentUser.id,
-        done: false, timeFrom: "", timeTo: ""
-      });
-    });
-    setNewReq({ title:"", machineId:"", assignedTo:"" });
-  };
-
-  const addMachine = () => {
-    if (!newMachine.trim()) return;
-    upd(d => d.machines.push({ id: Date.now(), name: newMachine.trim() }));
-    setNewMachine("");
-  };
-
-  // LOADING
-  if (!loaded) return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", color:"#fff", fontFamily:"sans-serif" }}>
-      <div style={{ textAlign:"center" }}><div style={{ fontSize:40, marginBottom:10 }}>⏳</div><div>Загрузка данных...</div></div>
-    </div>
-  );
-
-  // LOGIN
-  if (!currentUser) return (
-    <div style={{ minHeight:"100vh", background:"linear-gradient(135deg,#1e3a5f,#2d6a9f)", display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
-      <div style={{ background:"#fff", borderRadius:16, padding:32, width:"100%", maxWidth:340, boxShadow:"0 8px 32px rgba(0,0,0,0.2)" }}>
-        <div style={{ display:"flex", justifyContent:"center", marginBottom:14 }}>
-          <img src="/Logo.jpg" alt="Логотип" style={{ maxWidth:120, maxHeight:80, objectFit:"contain", borderRadius:8 }} onError={e => { e.target.style.display = "none"; }} />
-        </div>
-        <h2 style={{ margin:"0 0 6px", color:"#1e3a5f", textAlign:"center" }}>👥 Команда</h2>
-        <p style={{ margin:"0 0 22px", color:"#aaa", textAlign:"center", fontSize:12 }}>Транспорт М5</p>
-        <label style={{ fontSize:12, color:"#555" }}>Пользователь</label>
-        <select value={loginName} onChange={e => setLoginName(e.target.value)} style={{ ...S.select, width:"100%", margin:"4px 0 10px" }}>
-          <option value="">— выберите —</option>
-          {data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-        </select>
-        <label style={{ fontSize:12, color:"#555" }}>PIN-код</label>
-        <input type="password" maxLength={4} value={loginPin} onChange={e => setLoginPin(e.target.value)} placeholder="••••"
-          style={{ ...S.input, width:"100%", margin:"4px 0 14px", fontSize:20, letterSpacing:8, textAlign:"center" }} />
-        {loginErr && <p style={{ color:"red", fontSize:12, margin:"0 0 10px", textAlign:"center" }}>{loginErr}</p>}
-        <button onClick={() => {
-          const u = data.users.find(x => x.id === Number(loginName) && x.pin === loginPin);
-          if (!u) { setLoginErr("Неверный пользователь или PIN"); return; }
-          if (u.blocked) { setLoginErr("🔒 Доступ заблокирован"); return; }
-          setCurrentUser(u); setLoginErr(""); setTab(u.role === "manager" || u.role === "supervisor" ? "overview" : "plan");
-        }} style={{ ...S.btn(), width:"100%", padding:10, fontSize:15 }}>Войти</button>
-      </div>
-    </div>
-  );
-
-  // MACHINES PANEL
-  const MachinesPanel = () => (
-    <div>
-      <div style={S.card}>
-        <div style={{ fontWeight:600, color:"#1e3a5f", marginBottom:10 }}>➕ Добавить технику</div>
-        <div style={{ display:"flex", gap:8 }}>
-          <input value={newMachine} onChange={e => setNewMachine(e.target.value)} onKeyDown={e => e.key==="Enter"&&addMachine()} placeholder="Название техники..." style={{ ...S.input, flex:1 }} />
-          <button onClick={addMachine} style={S.btn()}>+</button>
-        </div>
-      </div>
-      {data.machines.map(m => (
-        <div key={m.id} style={{ ...S.card, display:"flex", alignItems:"center", gap:10, padding:"10px 14px", borderLeft:`3px solid ${m.repair?"#e74c3c":"#27ae60"}` }}>
-          <span style={{ fontSize:20 }}>{m.repair?"🔧":"🚜"}</span>
-          <div style={{ flex:1 }}>
-            <span style={{ fontWeight:500, fontSize:14, color:m.repair?"#aaa":"#222" }}>{m.name}</span>
-            {m.repair && <div style={{ fontSize:11, color:"#e74c3c" }}>На ремонте</div>}
-          </div>
-          <button onClick={() => upd(d => {
-            const mm = d.machines.find(x => x.id === m.id); if (!mm) return;
-            if (!mm.repair) { mm.repair = true; mm.repairSince = todayStr(); }
-            else { mm.repair = false; if (!mm.repairLog) mm.repairLog = []; mm.repairLog.push({ from: mm.repairSince || todayStr(), to: todayStr() }); mm.repairSince = null; }
-          })} style={{ background:m.repair?"#e8f7ee":"#fef3e2", border:"none", borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:11, color:m.repair?"#27ae60":"#e67e22" }}>
-            {m.repair?"✓ Вернуть в строй":"🔧 На ремонт"}
-          </button>
-          {m.id > 15 && <button onClick={() => upd(d => { d.machines = d.machines.filter(x => x.id !== m.id); })} style={{ background:"#fde8e8", border:"none", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:11, color:"#c0392b" }}>✕</button>}
-        </div>
-      ))}
-      <SaveBtn />
-    </div>
-  );
-
-  // PLAN PANEL
-  const PlanPanel = () => {
-    const planReqs = getReqsForDateByEmployee(currentUser.id, selDate);
-    return (
-      <div>
-        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
-          <label style={{ fontSize:13, color:"#555" }}>Дата:</label>
-          <input type="date" value={selDate} onChange={e => setSelDate(e.target.value)} style={S.input} />
-        </div>
-        {canAddReq(currentUser) && currentUser.role !== "manager" && (
-          <div style={S.card}>
-            <div style={{ fontWeight:600, color:"#1e3a5f", marginBottom:10 }}>➕ Новая заявка</div>
-            <input value={newReq.title} onChange={e => setNewReq(p => ({ ...p, title:e.target.value }))}
-              onKeyDown={e => e.key==="Enter"&&addRequest()} placeholder="Название заявки..." style={{ ...S.input, width:"100%", marginBottom:8 }} />
-            <select value={newReq.machineId} onChange={e => setNewReq(p => ({ ...p, machineId:e.target.value }))} style={{ ...S.select, width:"100%", marginBottom:8 }}>
-              <option value="">🚜 Без техники</option>
-              {data.machines.filter(m=>!m.repair).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
-            </select>
-            <select value={newReq.assignedTo} onChange={e => setNewReq(p => ({ ...p, assignedTo:e.target.value }))} style={{ ...S.select, width:"100%", marginBottom:10 }}>
-              <option value="">👤 Назначить сотрудника (по умолчанию — я)</option>
-              {data.users.filter(u => u.role !== "manager").map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-            </select>
-            <button onClick={addRequest} style={{ ...S.btn(), width:"100%", padding:9 }}>Добавить заявку</button>
-          </div>
-        )}
-        <SaveBtn />
-        {planReqs.length === 0 && <div style={{ color:"#888", textAlign:"center", padding:24 }}>{currentUser.role==="driver"?"🚗":"📋"} На {fmtDate(selDate)} заявок нет</div>}
-        {planReqs.map(r => {
-          const m = data.machines.find(x => x.id === Number(r.machineId));
-          return (
-            <div key={r.id} style={{ ...S.card, padding:"10px 14px", borderLeft:`3px solid ${r._mine||currentUser.role==="manager"?"#2d6a9f":"#8e44ad"}` }}>
-              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
-                <button onClick={() => {
-                  if (isPastDate(selDate)) return;
-                  upd(d => {
-                    const stamp = `${currentUser.name.split(" ")[0]} ${new Date().toLocaleString("ru",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}`;
-                    if (r._type === "task") { const t = d.tasks.find(x => x.id === r.id); if (t) { t.done = !t.done; t.doneBy = t.done ? stamp : null; } }
-                    else { const uid = r._creatorId ?? currentUser.id; const req = d.requests[uid]?.[selDate]?.find(x => x.id === r.id); if (req) { req.done = !req.done; req.doneBy = req.done ? stamp : null; } }
-                  });
-                }} style={{ background:"none", border:"none", cursor: isPastDate(selDate)?"not-allowed":"pointer", fontSize:22, padding:0, opacity: isPastDate(selDate)?0.4:1 }}>
-                  {r.done ? "✅" : "⬜"}
-                </button>
-                <span style={{ flex:1, fontWeight:500, fontSize:14, color:r.done?"#aaa":"#222", textDecoration:r.done?"line-through":"none" }}>{r.title}</span>
-                {(r._mine||currentUser.role==="manager") && !r._type && (
-                  <button onClick={() => upd(d => { const uid = r._creatorId ?? currentUser.id; d.requests[uid][selDate] = d.requests[uid][selDate].filter(x => x.id !== r.id); })}
-                    style={{ background:"#fde8e8", border:"none", borderRadius:6, padding:"3px 8px", cursor:"pointer", fontSize:11, color:"#c0392b" }}>✕</button>
-                )}
-              </div>
-              <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                {r.time && <span style={S.tag({ background:"#fdecea", color:"#e74c3c", fontWeight:700 })}>⏰ {r.time}</span>}
-                {m && <span style={S.tag({ background:"#fef3e2", color:"#e67e22" })}>🚜 {m.name}</span>}
-                {!r._mine && r._type!=="task" && <span style={S.tag({ background:"#f0e8fd", color:"#8e44ad" })}>📌 Назначено</span>}
-                {r._type==="task" && <span style={S.tag({ background:"#f0e8fd", color:"#8e44ad" })}>📌 Задача</span>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
-
-  // MANAGER / SUPERVISOR VIEW
-  if (currentUser.role === "manager" || currentUser.role === "supervisor") {
-    const mTabs = [
-      { id:"overview",          label:"📊 Сводка" },
-      { id:"plan",              label:"📅 План" },
-      { id:"machines_overview", label:"🚜 Техника" },
-      { id:"tasks",             label:"✅ Задачи" },
-      ...(currentUser.role === "manager" ? [{ id:"report", label:"📈 Отчёт" }] : []),
-      { id:"machines",          label:"⚙️ Список" },
-      { id:"users",             label:"👤 Люди" },
-    ];
-    const employees = data.users.filter(u => u.role !== "manager");
-    const drivers   = data.users.filter(u => u.role === "driver");
-
-    return (
-      <div style={S.page}>
-        <div style={S.header}>
-          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-            <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }} onError={e => { e.target.style.display = "none"; }} />
-            <div>
-              <div style={{ fontWeight:700, fontSize:15 }}>👑 {currentUser.name}</div>
-              <div style={{ fontSize:12, opacity:0.8 }}>{currentUser.role==="manager"?"Руководитель":"Менеджер"}</div>
-            </div>
-          </div>
-          <button onClick={() => setCurrentUser(null)} style={{ background:"rgba(255,255,255,0.2)", border:"none", color:"#fff", borderRadius:8, padding:"5px 12px", cursor:"pointer", fontSize:13 }}>Выйти</button>
-        </div>
-
-        <div style={{ display:"flex", overflowX:"auto", borderBottom:"1px solid #dde3ea", background:"#fff" }}>
-          {mTabs.map(t => (
-            <button key={t.id} onClick={() => setManTab(t.id)}
-              style={{ flexShrink:0, padding:"11px 10px", border:"none", background:"none", fontWeight:manTab===t.id?700:400,
-                color:manTab===t.id?"#2d6a9f":"#666", borderBottom:manTab===t.id?"2.5px solid #2d6a9f":"2.5px solid transparent", cursor:"pointer", fontSize:12 }}>
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ padding:14, maxWidth:700, margin:"0 auto" }}>
-
-          {manTab==="overview" && (() => {
-            const weekDays = Array.from({length:7}, (_,i) => { const d=new Date(manDate); d.setDate(d.getDate()+i); return d.toISOString().slice(0,10); });
-            const dayNames = ["Вс","Пн","Вт","Ср","Чт","Пт","Сб"];
-            const sorted = [...employees].sort((a,b) => getReqsForDateByEmployee(b.id,manDate).length - getReqsForDateByEmployee(a.id,manDate).length);
-            return (
-              <div>
-                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:10, flexWrap:"wrap" }}>
-                  <label style={{ fontSize:13, color:"#555" }}>Дата:</label>
-                  <input type="date" value={manDate} onChange={e => setManDate(e.target.value)} style={S.input} />
-                  <div style={{ display:"flex", background:"#fff", borderRadius:8, overflow:"hidden", boxShadow:"0 1px 4px rgba(0,0,0,0.07)" }}>
-                    {["day","week"].map(m => (
-                      <button key={m} onClick={()=>setOvMode(m)} style={{ padding:"7px 14px", border:"none", cursor:"pointer", fontSize:13, fontWeight:ovMode===m?700:400, background:ovMode===m?"#2d6a9f":"#fff", color:ovMode===m?"#fff":"#666" }}>
-                        {m==="day"?"День":"Неделя"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                {ovMode==="week" && (
-                  <div>
-                    <div style={{ fontSize:12, color:"#888", marginBottom:10 }}>Неделя: {fmtDate(weekDays[0])} — {fmtDate(weekDays[6])}</div>
-                    {sorted.map(emp => {
-                      const weekData = weekDays.map(date => ({ date, items: getReqsForDateByEmployee(emp.id, date), wt: data.workTime[emp.id]?.[date] || {} }));
-                      const totalItems = weekData.reduce((s,d)=>s+d.items.length,0);
-                      const totalDone  = weekData.reduce((s,d)=>s+d.items.filter(r=>r.done).length,0);
-                      const totalHours = weekData.reduce((s,d)=>s+Number(calcHours(d.wt.from,d.wt.to)||0),0);
-                      const totalTrips = weekData.reduce((s,d)=>s+Number(d.wt.trips||0),0);
-                      return (
-                        <div key={emp.id} style={{ ...S.card, borderLeft:`4px solid ${totalItems>0?"#2d6a9f":"#ddd"}` }}>
-                          <div style={{ fontWeight:700, color:"#1e3a5f", fontSize:14, marginBottom:8 }}>{emp.role==="driver"?"🚗":"👤"} {emp.name}</div>
-                          <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
-                            <span style={S.tag({ background:"#e8f7ee", color:"#27ae60" })}>📋 {totalDone}/{totalItems}</span>
-                            <span style={S.tag({ background:"#e8f4fd", color:"#2d6a9f" })}>⏱ {totalHours.toFixed(1)} ч</span>
-                            {totalTrips>0 && <span style={S.tag({ background:"#fef3e2", color:"#e67e22" })}>🚗 {totalTrips} рейсов</span>}
-                          </div>
-                          <div style={{ display:"flex", gap:4, overflowX:"auto" }}>
-                            {weekData.map(({date, items, wt}) => {
-                              const dow = dayNames[new Date(date).getDay()]; const busy = items.length>0;
-                              return (
-                                <div key={date} style={{ flex:"1 0 auto", minWidth:42, textAlign:"center", background:busy?"#e8f4fd":"#f7f7f7", borderRadius:8, padding:"6px 4px" }}>
-                                  <div style={{ fontSize:10, color:"#888" }}>{dow}</div>
-                                  <div style={{ fontSize:11, fontWeight:600, color:"#555" }}>{date.slice(8)}</div>
-                                  <div style={{ fontSize:13, fontWeight:700, color:busy?"#2d6a9f":"#ccc", marginTop:2 }}>{busy?`${items.filter(r=>r.done).length}/${items.length}`:"—"}</div>
-                                  {wt.from && <div style={{ fontSize:9, color:"#27ae60" }}>{calcHours(wt.from,wt.to)}ч</div>}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {ovMode==="day" && (() => {
-                  const dayTotals = employees.reduce((acc,emp) => { const items=getReqsForDateByEmployee(emp.id,manDate); const wt=data.workTime[emp.id]?.[manDate]||{}; acc.total+=items.length; acc.done+=items.filter(r=>r.done).length; acc.hours+=Number(calcHours(wt.from,wt.to)||0); acc.trips+=Number(wt.trips||0); return acc; }, {total:0,done:0,hours:0,trips:0});
-                  return (
-                    <div style={{ ...S.card, background:"#f8fbff", display:"flex", justifyContent:"space-around", textAlign:"center", flexWrap:"wrap", gap:8 }}>
-                      <div><div style={{ fontSize:20, fontWeight:700, color:"#2d6a9f" }}>{dayTotals.done}/{dayTotals.total}</div><div style={{ fontSize:11, color:"#888" }}>📋 Заявок</div></div>
-                      <div><div style={{ fontSize:20, fontWeight:700, color:"#27ae60" }}>{dayTotals.hours.toFixed(1)}</div><div style={{ fontSize:11, color:"#888" }}>⏱ Часов</div></div>
-                      <div><div style={{ fontSize:20, fontWeight:700, color:"#e67e22" }}>{dayTotals.trips}</div><div style={{ fontSize:11, color:"#888" }}>🚗 Рейсов</div></div>
-                    </div>
-                  );
-                })()}
-                {ovMode==="day" && sorted.map(emp => {
-                  const items = getReqsForDateByEmployee(emp.id, manDate);
-                  const wt = data.workTime[emp.id]?.[manDate] || {};
-                  const done = items.filter(r => r.done).length;
-                  return (
-                    <div key={emp.id} style={{ ...S.card, borderLeft:`4px solid ${items.length>0?"#2d6a9f":"#ddd"}` }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
-                        <div style={{ fontWeight:700, color:"#1e3a5f", fontSize:14 }}>{emp.role==="driver"?"🚗":"👤"} {emp.name}</div>
-                        <div style={{ fontSize:11, color:"#aaa" }}>{fmtDate(manDate)}</div>
-                      </div>
-                      <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:items.length?8:0 }}>
-                        <span style={S.tag({ background:"#e8f4fd", color:"#2d6a9f" })}>⏱ {wt.from||"—"}–{wt.to||"—"} ({calcHours(wt.from,wt.to)} ч)</span>
-                        <span style={S.tag(items.length>0?{background:"#e8f7ee",color:"#27ae60"}:{background:"#f5f5f5",color:"#aaa"})}>📋 {done}/{items.length} заявок</span>
-                        {wt.trips && <span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚗 {wt.trips} рейсов</span>}
-                        {wt.route && <span style={S.tag({background:"#e8f7ee",color:"#27ae60"})}>📍 {wt.route}</span>}
-                        {wt.org   && <span style={S.tag({background:"#f0e8fd",color:"#8e44ad"})}>🏢 {wt.org}</span>}
-                      </div>
-                      {items.map(r => {
-                        const m = data.machines.find(x => x.id === Number(r.machineId));
-                        return (
-                          <div key={r.id} style={{ padding:"5px 0", borderTop:"1px solid #f5f5f5", fontSize:13 }}>
-                            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                              <span>{r.done?"✅":"⬜"}</span>
-                              <span style={{ flex:1, color:r.done?"#aaa":"#333", textDecoration:r.done?"line-through":"none" }}>{r.title}</span>
-                              {r.time && <span style={S.tag({background:"#fdecea",color:"#e74c3c"})}>⏰ {r.time}</span>}
-                              {m && <span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {m.name}</span>}
-                            </div>
-                            {r.comment && <div style={{ marginLeft:24, marginTop:3, fontSize:12, color:"#e67e22", fontStyle:"italic" }}>💬 {r.comment}</div>}
-                            {r.done && r.doneBy && <div style={{ marginLeft:24, marginTop:2, fontSize:11, color:"#27ae60" }}>✓ {r.doneBy}</div>}
-                          </div>
-                        );
-                      })}
-                      {items.length===0 && <div style={{ color:"#ccc", fontSize:12 }}>Нет заявок</div>}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-
-          {manTab==="plan" && <PlanPanel />}
-
-          {manTab==="machines_overview" && (() => {
-            const isBusy = m => getAllReqsForDate(manDate).some(r=>r.machineId===m.id) || data.tasks.some(t=>t.machineId===m.id&&t.date===manDate);
-            const sorted = [...data.machines].sort((a,b)=>isBusy(b)-isBusy(a));
-            return (
-              <div>
-                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
-                  <label style={{ fontSize:13, color:"#555" }}>Дата:</label>
-                  <input type="date" value={manDate} onChange={e=>setManDate(e.target.value)} style={S.input} />
-                </div>
-                {sorted.map(m => {
-                  const busy=isBusy(m); const usedReqs=getAllReqsForDate(manDate).filter(r=>r.machineId===m.id); const usedTasks=data.tasks.filter(t=>t.machineId===m.id&&t.date===manDate);
-                  return (
-                    <div key={m.id} style={{ ...S.card, borderLeft:`4px solid ${m.repair?"#f39c12":busy?"#27ae60":"#e74c3c"}` }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:busy?8:0 }}>
-                        <span style={{ fontSize:22 }}>{m.repair?"🔧":"🚜"}</span>
-                        <div style={{ flex:1, fontWeight:700, color:"#1e3a5f", fontSize:14 }}>{m.name}</div>
-                        <span style={S.tag(m.repair?{background:"#fef3e2",color:"#f39c12"}:busy?{background:"#e8f7ee",color:"#27ae60"}:{background:"#fdecea",color:"#e74c3c"})}>
-                          {m.repair?"🔧 На ремонте":busy?"🟢 Занята":"🔴 Простой"}
-                        </span>
-                      </div>
-                      {usedReqs.map(r=><div key={r.id} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 0",borderTop:"1px solid #f5f5f5",fontSize:13}}><span>{r.done?"✅":"⏳"}</span><span style={{flex:1}}>{r.title}</span><span style={S.tag({background:"#e8f4fd",color:"#2d6a9f"})}>📋 {r.userName.split(" ")[0]}</span></div>)}
-                      {usedTasks.map(t=>{const emp=data.users.find(u=>u.id===t.assignedTo); return <div key={t.id} style={{display:"flex",alignItems:"center",gap:6,padding:"5px 0",borderTop:"1px solid #f5f5f5",fontSize:13}}><span>{t.done?"✅":"⏳"}</span><span style={{flex:1}}>{t.title}</span><span style={S.tag({background:"#f0e8fd",color:"#8e44ad"})}>✅ {emp?.name.split(" ")[0]||"?"}</span></div>;})}
-                    </div>
-                  );
-                })}
-                {data.machines.length>0 && (
-                  <div style={{ ...S.card, background:"#f8fbff", textAlign:"center" }}>
-                    <div style={{ fontSize:13, color:"#555", marginBottom:6 }}>Итого на {fmtDate(manDate)}</div>
-                    <div style={{ display:"flex", justifyContent:"center", gap:24 }}>
-                      <div><div style={{ fontSize:26, fontWeight:700, color:"#27ae60" }}>{data.machines.filter(isBusy).length}</div><div style={{ fontSize:12, color:"#888" }}>🟢 Занято</div></div>
-                      <div><div style={{ fontSize:26, fontWeight:700, color:"#e74c3c" }}>{data.machines.filter(m=>!isBusy(m)).length}</div><div style={{ fontSize:12, color:"#888" }}>🔴 В простое</div></div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {manTab==="tasks" && (
-            <div>
-              <div style={S.card}>
-                <div style={{ fontWeight:600, marginBottom:10, color:"#1e3a5f" }}>➕ Новая задача</div>
-                <input value={newTask.title} onChange={e=>setNewTask(p=>({...p,title:e.target.value}))} placeholder="Описание задачи..." style={{ ...S.input, width:"100%", marginBottom:8 }} />
-                <input type="date" value={newTask.date} onChange={e=>setNewTask(p=>({...p,date:e.target.value}))} style={{ ...S.input, width:"100%", marginBottom:8 }} />
-                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-                  <label style={{ fontSize:13, color:"#555", whiteSpace:"nowrap" }}>⏰ К времени:</label>
-                  <input type="time" value={newTask.time} onChange={e=>setNewTask(p=>({...p,time:e.target.value}))} style={{ ...S.input, flex:1 }} />
-                </div>
-                <select value={newTask.assignedTo} onChange={e=>setNewTask(p=>({...p,assignedTo:e.target.value}))} style={{ ...S.select, width:"100%", marginBottom:8 }}>
-                  <option value="">— назначить сотруднику —</option>
-                  {employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
-                </select>
-                <select value={newTask.machineId} onChange={e=>setNewTask(p=>({...p,machineId:e.target.value}))} style={{ ...S.select, width:"100%", marginBottom:10 }}>
-                  <option value="">🚜 Без техники</option>
-                  {data.machines.filter(m=>!m.repair).map(m=><option key={m.id} value={m.id}>{m.name}</option>)}
-                </select>
-                <button onClick={() => {
-                  if (!newTask.title.trim()) { alert("Введите описание задачи"); return; }
-                  if (!newTask.assignedTo) { alert("Выберите сотрудника"); return; }
-                  upd(d=>d.tasks.push({id:Date.now(),title:newTask.title,assignedTo:Number(newTask.assignedTo),machineId:newTask.machineId?Number(newTask.machineId):null,done:false,date:newTask.date||todayStr(),time:newTask.time||""}));
-                  setNewTask({title:"",assignedTo:"",machineId:"",date:tomorrowStr(),time:""});
-                }} style={S.btn()}>Добавить</button>
-              </div>
-              <SaveBtn />
-              {data.tasks.length===0 && <div style={{color:"#aaa",textAlign:"center",padding:20}}>Задач пока нет</div>}
-              {data.tasks.map(task => {
-                const emp=data.users.find(u=>u.id===task.assignedTo); const tm=data.machines.find(m=>m.id===task.machineId);
-                return (
-                  <div key={task.id} style={{...S.card,display:"flex",alignItems:"center",gap:10}}>
-                    <span style={{fontSize:20}}>{task.done?"✅":"⏳"}</span>
-                    <div style={{flex:1}}>
-                      <div style={{fontWeight:500,color:task.done?"#aaa":"#222",textDecoration:task.done?"line-through":"none",fontSize:14}}>{task.title}</div>
-                      <div style={{fontSize:12,color:"#888",display:"flex",gap:6,flexWrap:"wrap",marginTop:2}}>
-                        <span>→ {emp?.name||"?"} · {fmtDate(task.date)}</span>
-                        {task.time && <span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>⏰ {task.time}</span>}
-                        {tm && <span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {tm.name}</span>}
-                      </div>
-                    </div>
-                    <button onClick={()=>upd(d=>{const t=d.tasks.find(x=>x.id===task.id);if(t)t.done=!t.done;})} style={{...S.btn(task.done?"#eee":"#e8f4fd"),color:"#555"}}>{task.done?"Открыть":"✓"}</button>
-                    <button onClick={()=>upd(d=>{d.tasks=d.tasks.filter(x=>x.id!==task.id);})} style={{...S.btn("#fde8e8"),color:"#c0392b"}}>✕</button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {manTab==="report" && currentUser.role==="manager" && (() => {
-            const allDays = monthDays(repYear, repMonth);
-            const daysInMonth = allDays.length;
-            const getItemsForDay = date => {
-              const r=[];
-              data.users.forEach(u=>(data.requests[u.id]?.[date]||[]).forEach(req=>r.push({...req,_creatorId:u.id})));
-              data.tasks.filter(t=>t.date===date).forEach(t=>r.push({...t,_type:"task"}));
-              return r;
-            };
-            const buildCopyText = () => {
-              let txt=`ОТЧЁТ ЗА ${MONTHS[repMonth-1].toUpperCase()} ${repYear}\n${"=".repeat(40)}\n\n`;
-              drivers.forEach(drv=>{
-                txt+=`🚗 ${drv.name}\n${"-".repeat(30)}\n`;
-                let tTrips=0,tHours=0,wDays=0;
-                allDays.forEach(date=>{
-                  const wt=data.workTime[drv.id]?.[date]||{};
-                  const items=getReqsForDateByEmployee(drv.id,date).filter(r=>r.done);
-                  if(!items.length)return; wDays++;
-                  tHours+=Number(calcHours(wt.from,wt.to)||0); tTrips+=Number(wt.trips||0);
-                  items.forEach(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));txt+=`  ${fmtDate(date)}: ${r.title}${m?` | 🚜 ${m.name}`:""} | ${wt.org||"—"} | ${wt.route||"—"} | рейсов: ${wt.trips||0} | ${wt.from||"—"}–${wt.to||"—"}\n`;});
-                });
-                txt+=`  Итого: ${wDays} дней · ${tHours.toFixed(1)} ч · ${tTrips} рейсов\n\n`;
-              });
-              return txt;
-            };
-            const downloadExcel = () => {
-              let csv="\uFEFF";
-              csv+=`Отчёт за ${MONTHS[repMonth-1]} ${repYear}\n\n`;
-              csv+="Водитель;Дата;Заявка;Техника;Организация;Маршрут;Рейсов;Время с;Время до;Часов\n";
-              drivers.forEach(drv=>{
-                allDays.forEach(date=>{
-                  const wt=data.workTime[drv.id]?.[date]||{};
-                  const items=getReqsForDateByEmployee(drv.id,date).filter(r=>r.done);
-                  items.forEach(r=>{const m=data.machines.find(x=>x.id===Number(r.machineId));csv+=`${drv.name};${fmtDate(date)};${r.title};${m?.name||""};${wt.org||""};${wt.route||""};${wt.trips||""};${wt.from||""};${wt.to||""};${calcHours(wt.from,wt.to)}\n`;});
-                });
-              });
-              const blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
-              const url=URL.createObjectURL(blob); const a=document.createElement("a");
-              a.href=url; a.download=`Отчёт_${MONTHS[repMonth-1]}_${repYear}.csv`; a.click(); URL.revokeObjectURL(url);
-            };
-            return (
-              <div>
-                <div style={{...S.card,display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-                  <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Месяц</label>
-                    <select value={repMonth} onChange={e=>setRepMonth(Number(e.target.value))} style={S.select}>{MONTHS.map((n,i)=><option key={i+1} value={i+1}>{n}</option>)}</select></div>
-                  <div><label style={{fontSize:12,color:"#555",display:"block",marginBottom:3}}>Год</label>
-                    <select value={repYear} onChange={e=>setRepYear(Number(e.target.value))} style={S.select}>{[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}</select></div>
-                  <button onClick={()=>{try{navigator.clipboard.writeText(buildCopyText());}catch{}}} style={{...S.btn("#27ae60"),marginTop:18}}>📋 Копировать</button>
-                  <button onClick={downloadExcel} style={{...S.btn("#2d6a9f"),marginTop:18}}>📥 Скачать Excel</button>
-                </div>
-                <div style={{display:"flex",background:"#fff",borderRadius:10,marginBottom:12,overflow:"hidden",boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-                  {[{id:"machines",label:"🚜 По технике"},{id:"drivers",label:"🚗 По водителям"}].map(s=>(
-                    <button key={s.id} onClick={()=>setRepSub(s.id)} style={{flex:1,padding:"10px 4px",border:"none",cursor:"pointer",fontSize:13,fontWeight:repSub===s.id?700:400,background:repSub===s.id?"#2d6a9f":"#fff",color:repSub===s.id?"#fff":"#666"}}>{s.label}</button>
-                  ))}
-                </div>
-                {repSub==="machines" && [...data.machines].sort((a,b)=>{
-                  const dA=allDays.filter(date=>getItemsForDay(date).some(r=>Number(r.machineId)===a.id&&r.done)).length;
-                  const dB=allDays.filter(date=>getItemsForDay(date).some(r=>Number(r.machineId)===b.id&&r.done)).length;
-                  return dB-dA;
-                }).map(m=>{
-                  const repairDays=allDays.filter(date=>{const periods=[...(m.repairLog||[])];if(m.repair&&m.repairSince)periods.push({from:m.repairSince,to:"9999-12-31"});return periods.some(p=>date>=p.from&&date<=p.to);}).length;
-                  const machineDays=allDays.map(date=>({date,items:getItemsForDay(date).filter(r=>Number(r.machineId)===m.id&&r.done)})).filter(d=>d.items.length>0);
-                  const totalTrips=machineDays.reduce((sum,d)=>sum+d.items.reduce((s,r)=>{const emp=data.users.find(u=>u.id===Number(r.assignedTo||r._creatorId));return s+Number(data.workTime[emp?.id]?.[d.date]?.trips||0);},0),0);
-                  return (
-                    <div key={m.id} style={S.card}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div style={{fontWeight:700,color:"#1e3a5f",fontSize:15}}>🚜 {m.name}</div>
-                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                          <span style={S.tag({background:"#e8f7ee",color:"#27ae60"})}>{machineDays.length} дней в работе</span>
-                          <span style={S.tag({background:"#fdecea",color:"#e74c3c"})}>{daysInMonth-machineDays.length-repairDays} простой</span>
-                          {repairDays>0&&<span style={S.tag({background:"#fef3e2",color:"#f39c12"})}>🔧 {repairDays} ремонт</span>}
-                        </div>
-                      </div>
-                      {machineDays.length===0&&<div style={{color:"#ccc",fontSize:13}}>Не использовалась</div>}
-                      {machineDays.map(({date,items})=>items.map(r=>{const emp=data.users.find(u=>u.id===Number(r.assignedTo||r._creatorId));const wt=data.workTime[emp?.id]?.[date]||{};return(
-                        <div key={r.id} style={{padding:"6px 0",borderTop:"1px solid #f5f5f5",fontSize:13}}>
-                          <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
-                            <span style={{fontWeight:600,color:"#2d6a9f",minWidth:70}}>{fmtDate(date)}</span>
-                            <span>🚗 {emp?.name?.split(" ")[0]||"?"} {emp?.name?.split(" ")[1]||""}</span>
-                            {wt.org&&<span style={S.tag({background:"#f0e8fd",color:"#8e44ad"})}>🏢 {wt.org}</span>}
-                            {wt.route&&<span style={S.tag({background:"#e8f4fd",color:"#2d6a9f"})}>📍 {wt.route}</span>}
-                            {wt.trips&&<span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚗 {wt.trips} рейс.</span>}
-                          </div>
-                        </div>
-                      );}))}
-                      {machineDays.length>0&&<div style={{marginTop:8,paddingTop:8,borderTop:"2px solid #f0f0f0"}}><span style={S.tag({background:"#e8f4fd",color:"#2d6a9f",fontWeight:700})}>Итого рейсов: {totalTrips}</span></div>}
-                    </div>
-                  );
-                })}
-                {repSub==="drivers" && drivers.map(drv=>{
-                  const workDays=allDays.map(date=>{const wt=data.workTime[drv.id]?.[date]||{};const items=getReqsForDateByEmployee(drv.id,date).filter(r=>r.done);if(!items.length)return null;return{date,wt,items};}).filter(Boolean);
-                  const totalTrips=workDays.reduce((s,d)=>s+Number(d.wt.trips||0),0);
-                  const totalHours=workDays.reduce((s,d)=>s+Number(calcHours(d.wt.from,d.wt.to)||0),0);
-                  return(
-                    <div key={drv.id} style={S.card}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                        <div style={{fontWeight:700,color:"#1e3a5f",fontSize:15}}>🚗 {drv.name}</div>
-                        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                          <span style={S.tag({background:"#e8f7ee",color:"#27ae60"})}>{workDays.length} дней</span>
-                          <span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>{totalTrips} рейсов</span>
-                          <span style={S.tag({background:"#e8f4fd",color:"#2d6a9f"})}>{totalHours.toFixed(1)} ч</span>
-                        </div>
-                      </div>
-                      {workDays.length===0&&<div style={{color:"#ccc",fontSize:13}}>Нет данных</div>}
-                      {workDays.map(({date,wt,items})=>{const machines=[...new Set(items.filter(r=>r.machineId).map(r=>data.machines.find(m=>m.id===Number(r.machineId))?.name).filter(Boolean))];return(
-                        <div key={date} style={{padding:"6px 0",borderTop:"1px solid #f5f5f5",fontSize:13}}>
-                          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
-                            <span style={{fontWeight:600,color:"#2d6a9f",minWidth:70}}>{fmtDate(date)}</span>
-                            <span style={S.tag({background:"#e8f7ee",color:"#27ae60"})}>⏱ {wt.from||"—"}–{wt.to||"—"} ({calcHours(wt.from,wt.to)} ч)</span>
-                            {wt.trips&&<span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚗 {wt.trips}</span>}
-                            {wt.org&&<span style={S.tag({background:"#f0e8fd",color:"#8e44ad"})}>🏢 {wt.org}</span>}
-                            {wt.route&&<span style={S.tag({background:"#e8f4fd",color:"#2d6a9f"})}>📍 {wt.route}</span>}
-                            {machines.map(mn=><span key={mn} style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {mn}</span>)}
-                          </div>
-                        </div>
-                      );})}
-                      {workDays.length>0&&<div style={{marginTop:8,paddingTop:8,borderTop:"2px solid #f0f0f0"}}><span style={S.tag({background:"#e8f4fd",color:"#2d6a9f",fontWeight:700})}>Итого: {workDays.length} дней · {totalHours.toFixed(1)} ч · {totalTrips} рейсов</span></div>}
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-
-          {manTab==="machines" && <MachinesPanel />}
-
-          {manTab==="users" && data.users.map(u=>(
-            <div key={u.id} style={{...S.card,display:"flex",alignItems:"center",gap:12,padding:"12px 14px",opacity:u.blocked?0.6:1}}>
-              <span style={{fontSize:22}}>{u.role==="manager"?"👑":u.role==="driver"?"🚗":"📋"}</span>
-              <div style={{flex:1}}>
-                <div style={{fontWeight:600,color:"#1e3a5f",fontSize:14}}>{u.name}</div>
-                <div style={{fontSize:12,color:"#888"}}>{u.role==="manager"?"Руководитель":u.role==="driver"?"Водитель":"Менеджер"}</div>
-              </div>
-              {u.blocked && <span style={S.tag({background:"#fdecea",color:"#e74c3c",fontWeight:700})}>🔒 Заблокирован</span>}
-              {currentUser.role==="manager" && u.id!==currentUser.id && (
-                <button onClick={()=>upd(d=>{const usr=d.users.find(x=>x.id===u.id);if(usr)usr.blocked=!usr.blocked;})}
-                  style={{...S.btn(u.blocked?"#e8f7ee":"#fde8e8"),color:u.blocked?"#27ae60":"#c0392b"}}>
-                  {u.blocked?"🔓 Разблокировать":"🔒 Заблокировать"}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // DRIVER / EMPLOYEE VIEW
-  const empTabs = currentUser.role==="driver"
-    ? [{id:"plan",label:"📅 План"},{id:"today",label:"🕐 Сегодня"}]
-    : [{id:"plan",label:"📅 План"},{id:"today",label:"🕐 Сегодня"},{id:"tasks",label:"✅ Задачи"},{id:"machines",label:"🚜 Техника"}];
-
-  const myTasks   = data.tasks.filter(t => t.assignedTo === currentUser.id);
-  const todayWt   = data.workTime[currentUser.id]?.[todayDate] || {};
-  const todayReqs = getReqsForDateByEmployee(currentUser.id, todayDate);
 
   return (
-    <div style={S.page}>
-      <div style={S.header}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <img src="/Logo.jpg" alt="" style={{ width:36, height:36, objectFit:"contain", borderRadius:6, background:"#fff" }} onError={e => { e.target.style.display = "none"; }} />
-          <div>
-            <div style={{fontWeight:700,fontSize:14}}>{currentUser.role==="driver"?"🚗":"👤"} {currentUser.name}</div>
-            <div style={{fontSize:11,opacity:0.8}}>Сегодня: {fmtDate(todayStr())}</div>
-          </div>
-        </div>
-        <button onClick={()=>setCurrentUser(null)} style={{background:"rgba(255,255,255,0.2)",border:"none",color:"#fff",borderRadius:8,padding:"5px 12px",cursor:"pointer",fontSize:13}}>Выйти</button>
+    <div>
+      <div style={{ ...S.card, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <select style={{ ...S.input, width: "auto", flex: "1 1 140px" }} value={month} onChange={e => setMonth(Number(e.target.value))}>
+          {MONTHS.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+        </select>
+        <select style={{ ...S.input, width: "auto", flex: "0 1 110px" }} value={year} onChange={e => setYear(Number(e.target.value))}>
+          {[now.getFullYear() - 1, now.getFullYear(), now.getFullYear() + 1].map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <button style={S.btn(C.green, { flex: "1 1 160px", fontSize: 14 })} onClick={downloadCsv} disabled={!rows.length}>⬇️ Скачать Excel (CSV)</button>
       </div>
 
-      <div style={{display:"flex",borderBottom:"1px solid #dde3ea",background:"#fff"}}>
-        {empTabs.map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)}
-            style={{flex:1,padding:"11px 4px",border:"none",background:"none",fontWeight:tab===t.id?700:400,
-              color:tab===t.id?"#2d6a9f":"#666",borderBottom:tab===t.id?"2.5px solid #2d6a9f":"2.5px solid transparent",cursor:"pointer",fontSize:12}}>
-            {t.label}
-          </button>
+      {data.error && <div style={{ ...S.card, background: C.redBg, color: C.red, fontSize: 14 }}>⚠️ {data.error}</div>}
+
+      <div style={{ ...S.card, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", textAlign: "center", padding: 10, gap: 4 }}>
+        <div><div style={{ fontSize: 20, fontWeight: 800, color: C.green }}>{done.length}</div><div style={S.muted}>смен</div></div>
+        <div><div style={{ fontSize: 20, fontWeight: 800, color: C.blue }}>{totalHours}</div><div style={S.muted}>часов</div></div>
+        <div><div style={{ fontSize: 20, fontWeight: 800, color: C.orange }}>{totalTrips}</div><div style={S.muted}>рейсов</div></div>
+        <div><div style={{ fontSize: 20, fontWeight: 800, color: missing.length ? C.red : C.gray }}>{missing.length}</div><div style={S.muted}>без отчёта</div></div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        {[["drivers", "👤 По водителям"], ["machines", "🚜 По технике"]].map(([k, l]) => (
+          <button key={k} style={mode === k ? S.btn(C.dark, { flex: 1, fontSize: 14, padding: "9px" }) : S.ghost({ flex: 1, fontSize: 14 })} onClick={() => setMode(k)}>{l}</button>
         ))}
       </div>
 
-      <div style={{padding:14,maxWidth:600,margin:"0 auto"}}>
-
-        {tab==="plan" && <PlanPanel />}
-
-        {tab==="today" && (
-          <div>
-            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-              <label style={{fontSize:13,color:"#555"}}>Дата:</label>
-              <input type="date" value={todayDate} onChange={e=>setTodayDate(e.target.value)} style={S.input}/>
+      {data.loading && data.key !== ym ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div>
+        : groups.length === 0 ? <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>За {MONTHS[month - 1].toLowerCase()} записей нет</div>
+        : groups.map(g => (
+          <div key={g.key} style={S.card}>
+            <div style={{ cursor: "pointer" }} onClick={() => setOpen(o => ({ ...o, [mode + g.key]: !o[mode + g.key] }))}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{g.title}</div>
+                <div style={{ color: C.blue, fontSize: 13, whiteSpace: "nowrap" }}>{open[mode + g.key] ? "▲ скрыть" : "▼ подробно"}</div>
+              </div>
+              <div>
+                <span style={S.tag(C.greenBg, C.green)}>{g.days} дн. / {g.shifts} смен</span>
+                <span style={S.tag(C.blueBg, C.blue)}>{g.hours} ч</span>
+                <span style={S.tag(C.orangeBg, C.orange)}>{g.trips} рейс.</span>
+                {g.missing > 0 && <span style={S.tag(C.redBg, C.red)}>⚠️ без отчёта: {g.missing}</span>}
+                {g.noWaybill > 0 && <span style={S.tag(C.redBg, C.red)}>📄 путевой не закрыт: {g.noWaybill}</span>}
+              </div>
             </div>
-            {currentUser.role==="driver" && (
-              <div style={S.card}>
-                <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:12}}>🚗 Отчёт по рейсам</div>
-                {isPastDate(todayDate)&&<div style={{background:"#fdecea",borderRadius:8,padding:"8px 12px",marginBottom:10,fontSize:13,color:"#e74c3c"}}>🔒 Редактирование прошедших дней недоступно</div>}
-                {["org","route","trips"].map(field=>(
-                  <div key={field} style={{marginBottom:10}}>
-                    <label style={{fontSize:12,color:"#555",display:"block",marginBottom:4}}>
-                      {field==="org"?"Название организации":field==="route"?"Маршрут":"Количество рейсов"}
-                    </label>
-                    <input type={field==="trips"?"number":"text"} disabled={isPastDate(todayDate)}
-                      value={data.workTime[currentUser.id]?.[todayDate]?.[field]||""}
-                      onChange={e=>upd(d=>{if(!d.workTime[currentUser.id])d.workTime[currentUser.id]={};if(!d.workTime[currentUser.id][todayDate])d.workTime[currentUser.id][todayDate]={};d.workTime[currentUser.id][todayDate][field]=e.target.value;})}
-                      placeholder={field==="org"?"Название организации...":field==="route"?"Например: Уфа — Стерлитамак...":"Введите кол-во рейсов..."}
-                      style={{...S.input,width:"100%",opacity:isPastDate(todayDate)?0.5:1}}/>
+            {open[mode + g.key] && (
+              <div style={{ marginTop: 8 }}>
+                {g.items.map(({ req, rep }) => (
+                  <div key={req.id} style={{ padding: "8px 0", borderTop: `1px solid ${C.border}`, fontSize: 13.5, lineHeight: 1.5 }}>
+                    <b>{fmtDate(req.date)}</b> · {mode === "drivers" ? mName(req.machineId) : userName(req.driverId)}
+                    <div style={{ color: "#33414f" }}>{[req.place, req.org].filter(Boolean).join(" · ")}</div>
+                    {rep?.done
+                      ? <div style={{ color: C.green }}>✅ {rep.from}–{rep.to} ({rep.hours} ч){Number(rep.trips) ? `, ${rep.trips} рейс.` : ""}{rep.route ? `, ${rep.route}` : ""}{rep.waybill ? "" : " · путевой не закрыт"}</div>
+                      : <div style={{ color: req.date < t ? C.red : C.gray }}>{req.date < t ? "⚠️ отчёт не заполнен" : "⏳ в плане"}</div>}
                   </div>
                 ))}
               </div>
             )}
-            <div style={S.card}>
-              <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:10}}>⏱ Рабочее время</div>
-              <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
-                {["from","to"].map(field=>(
-                  <div key={field}>
-                    <label style={{fontSize:11,color:"#888",display:"block",marginBottom:2}}>{field==="from"?"С":"До"}</label>
-                    <input type="time" value={todayWt[field]||""} disabled={isPastDate(todayDate)}
-                      onChange={e=>upd(d=>{if(!d.workTime[currentUser.id])d.workTime[currentUser.id]={};if(!d.workTime[currentUser.id][todayDate])d.workTime[currentUser.id][todayDate]={};d.workTime[currentUser.id][todayDate][field]=e.target.value;})}
-                      style={{...S.input,opacity:isPastDate(todayDate)?0.5:1}}/>
-                  </div>
-                ))}
-                <div style={{background:"#e8f4fd",borderRadius:10,padding:"8px 14px",textAlign:"center"}}>
-                  <div style={{fontSize:11,color:"#888"}}>Итого</div>
-                  <div style={{fontWeight:700,color:"#2d6a9f",fontSize:22}}>{calcHours(todayWt.from,todayWt.to)} ч</div>
-                </div>
-              </div>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+/* ---------------- техника ---------------- */
+function MachinesView({ machines, cfg, saveCfg }) {
+  const [name, setName] = useState("");
+  const [s, run] = useSaver();
+  const repair = cfg.machines.repair;
+  const toggle = (m) => run(() => saveCfg("machines", c => { c.repair = { ...c.repair, [m.id]: !c.repair[m.id] }; if (!c.repair[m.id]) delete c.repair[m.id]; }));
+  const add = () => {
+    const n = name.trim(); if (!n) return;
+    run(async () => { await saveCfg("machines", c => { c.extra = [...(c.extra || []), { id: 1000 + Date.now() % 1000000, name: n }]; }); setName(""); });
+  };
+  const remove = (m) => run(() => saveCfg("machines", c => { c.extra = (c.extra || []).filter(x => x.id !== m.id); delete c.repair[m.id]; }));
+  return (
+    <div>
+      <div style={S.card}>
+        <div style={S.h2}>🚜 Техника ({machines.length})</div>
+        <div style={S.muted}>Техника «в ремонте» не предлагается при составлении плана.</div>
+        <SaveNote s={s} />
+      </div>
+      {machines.map(m => (
+        <div key={m.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", borderLeft: `6px solid ${repair[m.id] ? C.red : C.green}` }}>
+          <div style={{ flex: "1 1 200px", fontWeight: 600 }}>{m.name}</div>
+          <span style={S.tag(repair[m.id] ? C.redBg : C.greenBg, repair[m.id] ? C.red : C.green)}>{repair[m.id] ? "🔧 В ремонте" : "✅ В работе"}</span>
+          <button style={S.ghost()} disabled={s.busy} onClick={() => toggle(m)}>{repair[m.id] ? "Вернуть в работу" : "В ремонт"}</button>
+          {m.extra && <button style={S.ghost({ color: C.red })} disabled={s.busy} onClick={() => remove(m)}>🗑</button>}
+        </div>
+      ))}
+      <div style={{ ...S.card, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input style={{ ...S.input, flex: "1 1 220px" }} value={name} onChange={e => setName(e.target.value)} placeholder="Новая техника: марка и госномер" />
+        <button style={S.btn()} disabled={s.busy} onClick={add}>➕ Добавить</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- сотрудники ---------------- */
+function PeopleView({ me, cfg, saveCfg }) {
+  const [s, run] = useSaver();
+  const blocked = cfg.blocked.ids;
+  const toggle = (u) => run(() => saveCfg("blocked", c => { c.ids = c.ids.includes(u.id) ? c.ids.filter(x => x !== u.id) : [...c.ids, u.id]; }));
+  return (
+    <div>
+      <div style={S.card}>
+        <div style={S.h2}>👥 Сотрудники</div>
+        <div style={S.muted}>Заблокированный сотрудник не сможет войти в приложение.</div>
+        <SaveNote s={s} />
+      </div>
+      {USERS.map(u => {
+        const b = blocked.includes(u.id);
+        return (
+          <div key={u.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", opacity: b ? 0.65 : 1 }}>
+            <div style={{ flex: "1 1 200px" }}>
+              <div style={{ fontWeight: 600 }}>{u.name}</div>
+              <div style={S.muted}>{ROLE_LABEL[u.role]}</div>
             </div>
-            <SaveBtn />
-            <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:8,marginTop:12}}>Заявки на {fmtDate(todayDate)}</div>
-            {todayReqs.length===0&&<div style={{color:"#aaa",textAlign:"center",padding:20}}>Нет заявок на этот день</div>}
-            {todayReqs.map(r=>{
-              const m=data.machines.find(x=>x.id===Number(r.machineId));
-              return(
-                <div key={r.id} style={S.card}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                    <button onClick={()=>upd(d=>{
-                      const stamp=`${currentUser.name.split(" ")[0]} ${new Date().toLocaleString("ru",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}`;
-                      if(r._type==="task"){const t=d.tasks.find(x=>x.id===r.id);if(t){t.done=!t.done;t.doneBy=t.done?stamp:null;}}
-                      else{const uid=r._creatorId??currentUser.id;const req=d.requests[uid]?.[todayDate]?.find(x=>x.id===r.id);if(req){req.done=!req.done;req.doneBy=req.done?stamp:null;}}
-                    })} style={{background:"none",border:"none",cursor:"pointer",fontSize:22,padding:0}}>{r.done?"✅":"⬜"}</button>
-                    <span style={{flex:1,fontWeight:500,color:r.done?"#aaa":"#222",textDecoration:r.done?"line-through":"none",fontSize:14}}>{r.title}</span>
-                    {m&&<span style={S.tag({background:"#fef3e2",color:"#e67e22"})}>🚜 {m.name}</span>}
-                  </div>
-                  {!r._type&&(
-                    <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                      {["timeFrom","timeTo"].map(field=>(
-                        <div key={field}>
-                          <label style={{fontSize:11,color:"#aaa",display:"block",marginBottom:2}}>{field==="timeFrom"?"Начало":"Конец"}</label>
-                          <input type="time" value={r[field]||""} disabled={isPastDate(todayDate)}
-                            onChange={e=>upd(d=>{const uid=r._creatorId??currentUser.id;const req=d.requests[uid]?.[todayDate]?.find(x=>x.id===r.id);if(req)req[field]=e.target.value;})}
-                            style={{...S.input,fontSize:13,opacity:isPastDate(todayDate)?0.5:1}}/>
-                        </div>
-                      ))}
-                      {r.timeFrom&&r.timeTo&&<div style={{background:"#e8f7ee",borderRadius:8,padding:"4px 10px",fontSize:13,color:"#27ae60",alignSelf:"flex-end"}}>{calcHours(r.timeFrom,r.timeTo)} ч</div>}
-                    </div>
-                  )}
-                  <div style={{marginTop:8}}>
-                    <label style={{fontSize:11,color:"#aaa",display:"block",marginBottom:2}}>💬 Комментарий</label>
-                    <input type="text" value={r.comment||""} disabled={isPastDate(todayDate)}
-                      onChange={e=>upd(d=>{if(r._type==="task"){const t=d.tasks.find(x=>x.id===r.id);if(t)t.comment=e.target.value;}else{const uid=r._creatorId??currentUser.id;const req=d.requests[uid]?.[todayDate]?.find(x=>x.id===r.id);if(req)req.comment=e.target.value;}})}
-                      placeholder="Написать комментарий..."
-                      style={{...S.input,width:"100%",fontSize:13,opacity:isPastDate(todayDate)?0.5:1}}/>
-                  </div>
-                </div>
-              );
-            })}
+            {b && <span style={S.tag(C.redBg, C.red)}>🔒 Заблокирован</span>}
+            {u.id !== me.id && (
+              <button style={S.ghost({ color: b ? C.green : C.red })} disabled={s.busy} onClick={() => toggle(u)}>{b ? "Разблокировать" : "Заблокировать"}</button>
+            )}
           </div>
-        )}
+        );
+      })}
+    </div>
+  );
+}
 
-        {tab==="tasks" && (
-          <div>
-            <div style={{fontWeight:600,color:"#1e3a5f",marginBottom:10}}>Мои задачи</div>
-            {myTasks.length===0&&<div style={{color:"#aaa",textAlign:"center",padding:30}}>Задач пока нет</div>}
-            {myTasks.map(task=>(
-              <div key={task.id} style={{...S.card,display:"flex",alignItems:"center",gap:10}}>
-                <button onClick={()=>upd(d=>{const t=d.tasks.find(x=>x.id===task.id);if(t)t.done=!t.done;})}
-                  style={{background:"none",border:"none",cursor:"pointer",fontSize:22,padding:0}}>{task.done?"✅":"⬜"}</button>
-                <div style={{flex:1}}>
-                  <div style={{fontWeight:500,color:task.done?"#aaa":"#222",textDecoration:task.done?"line-through":"none",fontSize:14}}>{task.title}</div>
-                  <div style={{fontSize:12,color:"#aaa"}}>{fmtDate(task.date)}</div>
-                </div>
-                <span style={S.tag(task.done?{background:"#e8f7ee",color:"#27ae60"}:{background:"#fff3cd",color:"#e67e22"})}>{task.done?"Выполнено":"В работе"}</span>
-              </div>
+/* ---------------- вход ---------------- */
+function Login({ blockedIds, onLogin }) {
+  const [uid, setUid] = useState("");
+  const [pin, setPin] = useState("");
+  const [err, setErr] = useState("");
+  const users = USERS.filter(u => !blockedIds.includes(u.id)).slice().sort((a, b) => a.name.localeCompare(b.name, "ru"));
+  const submit = () => {
+    const u = USERS.find(x => x.id === Number(uid));
+    if (!u) return setErr("Выберите себя из списка");
+    if (blockedIds.includes(u.id)) return setErr("Доступ закрыт. Обратитесь к руководителю.");
+    if (u.pin !== pin) return setErr("Неверный PIN-код");
+    onLogin(u);
+  };
+  return (
+    <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, background: `linear-gradient(135deg, ${C.dark}, ${C.blue})` }}>
+      <div style={{ ...S.card, width: "100%", maxWidth: 380, padding: 26 }}>
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ fontSize: 40 }}>🚚</div>
+          <div style={{ fontWeight: 800, fontSize: 20, color: C.dark }}>Транспорт М5</div>
+          <div style={S.muted}>План работ и отчёты</div>
+        </div>
+        <div style={{ display: "grid", gap: 12 }}>
+          <Field label="Кто вы">
+            <select style={S.input} value={uid} onChange={e => { setUid(e.target.value); setErr(""); }}>
+              <option value="">— выберите —</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </Field>
+          <Field label="PIN-код">
+            <input style={{ ...S.input, textAlign: "center", letterSpacing: 8, fontSize: 20 }} type="password" inputMode="numeric" maxLength={4}
+              value={pin} onChange={e => { setPin(e.target.value.replace(/\D/g, "")); setErr(""); }}
+              onKeyDown={e => e.key === "Enter" && submit()} placeholder="••••" />
+          </Field>
+          {err && <div style={{ color: C.red, fontSize: 14, textAlign: "center" }}>{err}</div>}
+          <button style={S.btn(C.blue, { width: "100%", fontSize: 16, padding: 13 })} onClick={submit}>Войти</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- приложение ---------------- */
+export default function App() {
+  const [me, setMe] = useState(() => { const id = Number(lsGet("m5_user")); return USERS.find(u => u.id === id) || null; });
+  const [cfg, setCfg] = useState(emptyCfg);
+  const [tab, setTab] = useState("plan");
+  const online = useNet();
+
+  const loadCfg = useCallback(async () => {
+    try { setCfg(await api.getCfg()); } catch {}
+  }, []);
+  useEffect(() => {
+    loadCfg();
+    const t = setInterval(() => { if (document.visibilityState === "visible") loadCfg(); }, 60000);
+    return () => clearInterval(t);
+  }, [loadCfg]);
+
+  // если сотрудника заблокировали — выходим
+  useEffect(() => {
+    if (me && cfg.blocked.ids.includes(me.id)) { setMe(null); lsSet("m5_user", null); }
+  }, [cfg, me]);
+
+  // изменение настроек: читаем свежую версию с сервера, меняем, записываем
+  const saveCfg = async (part, mutate) => {
+    const fresh = await api.getCfg();
+    const piece = clone(fresh[part]);
+    mutate(piece);
+    await api.put(part === "machines" ? "cfg_machines" : "cfg_blocked", piece);
+    setCfg({ ...fresh, [part]: piece });
+  };
+
+  const login = u => { setMe(u); lsSet("m5_user", String(u.id)); setTab("plan"); };
+  const logout = () => { setMe(null); lsSet("m5_user", null); };
+
+  if (!me) return <Login blockedIds={cfg.blocked.ids} onLogin={login} />;
+
+  const machines = [...MACHINES, ...(cfg.machines.extra || []).map(m => ({ ...m, extra: true }))];
+  const repair = cfg.machines.repair || {};
+  const isDriver = me.role === "driver";
+  const tabs = isDriver ? [] : [
+    ["plan", "📅 План"], ["report", "📊 Отчёт"], ["machines", "🚜 Техника"],
+    ...(me.role === "manager" ? [["people", "👥 Люди"]] : []),
+  ];
+
+  return (
+    <div style={S.page}>
+      <div style={S.header}>
+        <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 800, fontSize: 17 }}>🚚 Транспорт М5</div>
+            <div style={{ fontSize: 13, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me.name} · {ROLE_LABEL[me.role]}</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span title={online ? "Связь с сервером есть" : "Нет связи с сервером"} style={{ fontSize: 12, opacity: 0.95 }}>{online ? "🟢" : "🔴 нет связи"}</span>
+            <button onClick={logout} style={{ background: "rgba(255,255,255,0.18)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 12px", cursor: "pointer", fontWeight: 600, fontFamily: "inherit" }}>Выйти</button>
+          </div>
+        </div>
+      </div>
+
+      {isDemo() && (
+        <div style={{ background: "#fff8e1", color: "#8a6d00", fontSize: 13, padding: "8px 16px", textAlign: "center" }}>
+          Демо-режим предпросмотра: данные примерные и сохраняются только в этом окне. Настоящая база не затрагивается.
+        </div>
+      )}
+
+      {tabs.length > 0 && (
+        <div style={{ background: "#fff", borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, zIndex: 5 }}>
+          <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", overflowX: "auto" }}>
+            {tabs.map(([k, l]) => (
+              <button key={k} onClick={() => setTab(k)} style={{
+                flex: "1 0 auto", background: "none", border: "none", padding: "12px 14px", cursor: "pointer", fontSize: 14.5, fontFamily: "inherit",
+                fontWeight: tab === k ? 800 : 500, color: tab === k ? C.blue : C.gray,
+                borderBottom: tab === k ? `3px solid ${C.blue}` : "3px solid transparent",
+              }}>{l}</button>
             ))}
-            <SaveBtn />
           </div>
-        )}
+        </div>
+      )}
 
-        {tab==="machines" && <MachinesPanel />}
+      <div style={S.wrap}>
+        {isDriver && <div style={{ ...S.h2, marginTop: 6 }}>Мои заявки</div>}
+        {(isDriver || tab === "plan") && (
+          <PlanView me={me} machines={machines} repair={repair} blockedIds={cfg.blocked.ids} isDriver={isDriver} />
+        )}
+        {!isDriver && tab === "report" && <ReportView machines={machines} />}
+        {!isDriver && tab === "machines" && <MachinesView machines={machines} cfg={cfg} saveCfg={saveCfg} />}
+        {!isDriver && tab === "people" && me.role === "manager" && <PeopleView me={me} cfg={cfg} saveCfg={saveCfg} />}
       </div>
     </div>
   );
