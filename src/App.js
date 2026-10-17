@@ -18,7 +18,7 @@ const USERS = [
   { id: 13, name: "Хамматов Эдуард Фригатович",       role: "manager",    pin: "0001" },
   { id: 12, name: "Хамматов Ринат Фригатович",        role: "supervisor", pin: "0011" },
   { id: 14, name: "Салахова Зимфира Маратовна",       role: "supervisor", pin: "0013" },
-  { id: 16, name: "Абдрахманова Ольга",               role: "supervisor", pin: "0015" },
+  { id: 16, name: "Абдрафигина Ольга Петровна",       role: "supervisor", pin: "0015" },
   { id: 3,  name: "Касымов Руслан Раилевич",          role: "driver",     pin: "0002" },
   { id: 4,  name: "Мурадымов Марат Хусаинович",       role: "driver",     pin: "0003" },
   { id: 5,  name: "Нафигин Вадим Шавкатович",         role: "driver",     pin: "0004" },
