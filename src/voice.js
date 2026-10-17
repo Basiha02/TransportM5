@@ -452,3 +452,20 @@ export function parseVoiceRequest(text, ctx) {
 
   return res;
 }
+
+/* ---------- разбор одного поля ---------- */
+// Время подачи: «8 утра», «в половине девятого», «14:30», «к девяти»
+export function parseTimeSpeech(text) {
+  for (const t of ["в " + text, text]) {
+    const toks = tokenize(t);
+    const r = findTime(toks);
+    if (r) return r;
+  }
+  return null;
+}
+
+// Техника: «кран 25», «самосвал 020», «манипулятор 576», «грейдер»
+export function parseMachineSpeech(text, machines, isFree) {
+  const r = findMachine(tokenize(text), machines || [], isFree || (() => true));
+  return { machine: r.machine || null, ambiguous: r.ambiguous || null };
+}

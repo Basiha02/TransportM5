@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { parseVoiceRequest } from "./voice";
+import { parseTimeSpeech, parseMachineSpeech } from "./voice";
 
 /* =====================================================================
    Транспорт М5 — план работ и отчёты водителей
@@ -460,78 +460,82 @@ function MicInput({ value, onChange, placeholder }) {
   );
 }
 
-/* ---------------- заявка голосом ---------------- */
-function VoicePanel({ getCtx, onParsed, machines }) {
+/* ---------------- техника и время голосом ---------------- */
+function MicStatus({ sp, msg }) {
+  return (
+    <>
+      {sp.on && <span style={{ display: "block", fontSize: 12.5, color: C.red, marginTop: 4 }}>● Слушаю… {sp.text}</span>}
+      {msg && !sp.on && <span style={{ display: "block", fontSize: 12.5, color: C.orange, marginTop: 4 }}>{msg}</span>}
+      {sp.error && <span style={{ display: "block", fontSize: 12, color: C.red, marginTop: 4 }}>{SPEECH_ERRORS[sp.error] || "Ошибка микрофона: " + sp.error}</span>}
+    </>
+  );
+}
+
+function MachineSelect({ value, onChange, machines, repairOf, date, dayReqs, selfId }) {
   const sp = useSpeech();
-  const [text, setText] = useState("");
-  const [result, setResult] = useState(null);
-  const parse = t => {
-    const r = parseVoiceRequest(t, getCtx());
-    setResult(r);
-    onParsed(r);
-  };
-  const dictate = () => {
+  const [msg, setMsg] = useState("");
+  const busyOn = id => (dayReqs || []).some(r => Number(r.machineId) === Number(id) && r.id !== selfId && r.date === date);
+  const click = () => {
     if (sp.on) { sp.stop(); return; }
-    const before = text.trim();
+    setMsg("");
     sp.start(t => {
       if (!t) return;
-      const full = (before ? before + " " : "") + t;
-      setText(full);
-      parse(full);
-    }, true);
+      const r = parseMachineSpeech(t, machines, id => !repairOf(id, date) && !busyOn(id));
+      if (r.machine) {
+        if (repairOf(r.machine.id, date)) { setMsg(`⚠️ ${r.machine.name} в ремонте на эту дату — выберите другую`); return; }
+        onChange(r.machine.id);
+        setMsg(busyOn(r.machine.id) ? `ℹ️ ${r.machine.name} уже стоит в плане на эту дату` : "");
+      } else if (r.ambiguous) {
+        setMsg(`«${t}» — подходит несколько: ${r.ambiguous.map(m => m.name).join("; ")}. Скажите номер или выберите в списке.`);
+      } else {
+        setMsg(`Не поняла технику: «${t}». Скажите, например: «кран 25» или «самосвал 020».`);
+      }
+    }, false);
   };
-  const shown = sp.on ? (text.trim() ? text.trim() + " " : "") + sp.text : text;
-  const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "";
-  const chips = result ? [
-    result.date && "📅 " + fmtDay(result.date),
-    result.time && "🕗 " + result.time,
-    result.driverId && "👤 " + shortName(result.driverId),
-    result.machineId && "🚜 " + mName(result.machineId),
-    result.place && "📍 " + result.place,
-    result.org && "🏢 " + result.org,
-    result.note && "💬 " + result.note,
-  ].filter(Boolean) : [];
-
   return (
-    <div data-testid="voice-panel" style={{ border: `1.5px dashed ${C.purple}`, background: "#faf5fe", borderRadius: 12, padding: 12, display: "grid", gap: 8 }}>
-      {sp.supported ? (
-        <button type="button" onClick={dictate}
-          style={S.btn(sp.on ? C.red : C.purple, { width: "100%", fontSize: 16, padding: 13, animation: sp.on ? "m5pulse 1.4s infinite" : "none" })}>
-          {sp.on ? "⏹ Готово" : text.trim() ? "🎤 Дополнить голосом" : "🎤 Надиктовать заявку"}
-        </button>
-      ) : (
-        <div style={{ fontWeight: 700, color: C.purple }}>🎤 Заявка голосом</div>
-      )}
-      {sp.on && <div style={{ color: C.red, fontWeight: 700, fontSize: 14 }}>● Слушаю… Говорите, а в конце нажмите «Готово»</div>}
-      {!sp.on && !text && (
-        <div style={{ fontSize: 13, color: "#5b4a6b", lineHeight: 1.45 }}>
-          {sp.supported
-            ? "Скажите одной фразой, например: «Завтра Касымов, самосвал 020, к 8 утра, карьер на Линейной 98, заказчик СтройМонтаж, везти щебень». Поля ниже заполнятся сами — проверьте и сохраните."
-            : "Нажмите на поле ниже и продиктуйте заявку через 🎤 на клавиатуре телефона (или напишите), затем нажмите «Заполнить поля». Например: «Завтра Касымов, самосвал 020, к 8 утра, карьер на Линейной 98, заказчик СтройМонтаж»."}
-        </div>
-      )}
-      <textarea rows={sp.on || text ? 3 : 2} value={shown} readOnly={sp.on}
-        onChange={e => { setText(e.target.value); setResult(null); }}
-        placeholder={sp.supported ? "Здесь появится то, что вы сказали — текст можно поправить" : "Продиктуйте или напишите заявку сюда"}
-        style={{ ...S.input, resize: "vertical", fontSize: 15, lineHeight: 1.4, fontFamily: "inherit" }} />
-      {!sp.on && text.trim() && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button type="button" style={S.btn(C.purple, { flex: "1 1 200px", fontSize: 14, padding: "10px 12px" })} onClick={() => parse(text)}>
-            {result ? "🔁 Разобрать текст заново" : "✨ Заполнить поля из текста"}
-          </button>
-          <button type="button" style={S.ghost({ padding: "10px 12px" })} onClick={() => { setText(""); setResult(null); }}>Очистить</button>
-        </div>
-      )}
-      {chips.length > 0 && (
-        <div>
-          <div style={{ fontSize: 12.5, color: C.gray, fontWeight: 600 }}>Заполнено из голоса — проверьте поля ниже:</div>
-          {chips.map(c => <span key={c} style={S.tag(C.greenBg, C.green)}>{c}</span>)}
-        </div>
-      )}
-      {result && !chips.length && <div style={{ fontSize: 13, color: C.orange }}>Не удалось ничего разобрать — попробуйте сказать по-другому или заполните поля вручную.</div>}
-      {result && result.warnings.map(w => <div key={w} style={{ fontSize: 13, color: C.orange }}>{w}</div>)}
-      {sp.error && <div style={{ fontSize: 13, color: C.red }}>{SPEECH_ERRORS[sp.error] || "Ошибка микрофона: " + sp.error}</div>}
-    </div>
+    <span style={{ display: "block" }}>
+      <span style={{ display: "flex", gap: 6 }}>
+        <select style={{ ...S.input, flex: 1, minWidth: 0 }} value={value || ""} onChange={e => { setMsg(""); onChange(e.target.value); }}>
+          <option value="">— без техники —</option>
+          {machines.map(m => {
+            const rp = repairOf(m.id, date);
+            return <option key={m.id} value={m.id} disabled={!!rp}>{m.name}{rp ? " (в ремонте)" : busyOn(m.id) ? " (уже в плане)" : ""}</option>;
+          })}
+        </select>
+        {sp.supported && (
+          <button type="button" onClick={click} style={micBtn(sp.on)} title={sp.on ? "Закончить" : "Назвать технику голосом"}
+            aria-label={sp.on ? "Закончить диктовку" : "Назвать технику голосом"}>{sp.on ? "⏹" : "🎤"}</button>
+        )}
+      </span>
+      <MicStatus sp={sp} msg={msg} />
+    </span>
+  );
+}
+
+function TimeInput({ value, onChange }) {
+  const sp = useSpeech();
+  const [msg, setMsg] = useState("");
+  const click = () => {
+    if (sp.on) { sp.stop(); return; }
+    setMsg("");
+    sp.start(t => {
+      if (!t) return;
+      const tm = parseTimeSpeech(t);
+      if (tm) onChange(tm);
+      else setMsg(`Не поняла время: «${t}». Скажите, например: «8 утра» или «в половине девятого».`);
+    }, false);
+  };
+  return (
+    <span style={{ display: "block" }}>
+      <span style={{ display: "flex", gap: 6 }}>
+        <input type="time" style={{ ...S.input, flex: 1, minWidth: 0 }} value={value} onChange={e => { setMsg(""); onChange(e.target.value); }} />
+        {sp.supported && (
+          <button type="button" onClick={click} style={micBtn(sp.on)} title={sp.on ? "Закончить" : "Сказать время голосом"}
+            aria-label={sp.on ? "Закончить диктовку" : "Сказать время голосом"}>{sp.on ? "⏹" : "🎤"}</button>
+        )}
+      </span>
+      <MicStatus sp={sp} msg={msg} />
+    </span>
   );
 }
 
@@ -541,21 +545,6 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
-  const [voiceKey, setVoiceKey] = useState(0);
-  const voiceCtx = () => ({
-    today: todayStr(), baseDate: f.date || date, drivers, machines, lockDriver, repairOf,
-    isFree: (id, d) => !repairOf(id, d) && !(dayReqs || []).some(r => Number(r.machineId) === Number(id) && r.date === d && r.id !== f.id),
-  });
-  const applyVoice = r => setF(x => ({
-    ...x,
-    ...(r.date ? { date: r.date } : {}),
-    ...(r.time ? { time: r.time } : {}),
-    ...(r.driverId && !lockDriver ? { driverId: r.driverId } : {}),
-    ...(r.machineId ? { machineId: r.machineId } : {}),
-    ...(r.place ? { place: r.place } : {}),
-    ...(r.org ? { org: r.org } : {}),
-    ...(r.note ? { note: r.note } : {}),
-  }));
   const busyMachine = f.machineId && (dayReqs || []).find(r => Number(r.machineId) === Number(f.machineId) && r.id !== f.id && r.date === f.date);
   const busyDriver = f.driverId && (dayReqs || []).find(r => Number(r.driverId) === Number(f.driverId) && r.id !== f.id && r.date === f.date);
 
@@ -564,12 +553,11 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
     if (!f.place.trim() && !f.org.trim()) return setErr("Укажите, куда ехать или заказчика");
     setErr("");
     const ok = await run(() => onSubmit({ ...f, driverId: Number(f.driverId), machineId: f.machineId ? Number(f.machineId) : null, place: f.place.trim(), org: f.org.trim(), note: f.note.trim() }));
-    if (ok && !initial) { setF(x => ({ ...x, place: "", org: "", note: "", machineId: "", driverId: lockDriver || "" })); setVoiceKey(k => k + 1); }
+    if (ok && !initial) setF(x => ({ ...x, place: "", org: "", note: "", machineId: "", driverId: lockDriver || "" }));
   };
 
   return (
     <div style={{ display: "grid", gap: 10 }}>
-      {!initial && <VoicePanel key={voiceKey} getCtx={voiceCtx} onParsed={applyVoice} machines={machines} />}
       <div style={S.grid2}>
         {!lockDriver && (
           <Field label="Водитель *">
@@ -580,17 +568,11 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
           </Field>
         )}
         <Field label="Техника">
-          <select style={S.input} value={f.machineId || ""} onChange={e => set("machineId", e.target.value)}>
-            <option value="">— без техники —</option>
-            {machines.map(m => {
-              const rp = repairOf(m.id, f.date || date);
-              const busy = (dayReqs || []).some(r => Number(r.machineId) === m.id && r.id !== f.id && r.date === (f.date || date));
-              return <option key={m.id} value={m.id} disabled={!!rp}>{m.name}{rp ? " (в ремонте)" : busy ? " (уже в плане)" : ""}</option>;
-            })}
-          </select>
+          <MachineSelect value={f.machineId} onChange={v => set("machineId", v)} machines={machines} repairOf={repairOf}
+            date={f.date || date} dayReqs={dayReqs} selfId={f.id} />
         </Field>
         <Field label="Время подачи">
-          <input type="time" style={S.input} value={f.time} onChange={e => set("time", e.target.value)} />
+          <TimeInput value={f.time} onChange={v => set("time", v)} />
         </Field>
         <Field label="Дата">
           <input type="date" style={S.input} value={f.date} onChange={e => e.target.value && set("date", e.target.value)} />
