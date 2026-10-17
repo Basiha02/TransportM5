@@ -138,7 +138,7 @@ async function sbFetch(path, opts = {}) {
 }
 
 /* --- демо-режим (только для предпросмотра, база не затрагивается) --- */
-const DEMO_KEY = "m5_demo_rows_v3";
+const DEMO_KEY = "m5_demo_rows_v4";
 let demoRows = null;
 function demoSeed() {
   const t = todayStr(), y = addDays(t, -1), tm = addDays(t, 1);
@@ -157,6 +157,11 @@ function demoSeed() {
   add(t, 5, 10, "07:30", "п. Терема", "ИП Колдаева", "", null);
   add(tm, 3, 2, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "", null);
   add(tm, 7, 5, "10:00", "ул. Труда, 160", "ООО «Альфа»", "Манипулятор, 2 точки", null);
+  add(addDays(t, 3), 6, 8, "08:30", "ЖК Ньютон", "ООО «СтройМонтаж»", "", null);
+  rows.cfg_machines = { repair: {}, extra: [], repairs: [
+    { id: "demo_r1", machineId: 9, from: addDays(t, -3), to: null, note: "Замена гидроцилиндра", by: 1 },
+    { id: "demo_r2", machineId: 12, from: addDays(t, -20), to: addDays(t, -16), note: "ТО и ремонт тормозов", by: 13 },
+  ] };
   return rows;
 }
 function demoDb() {
@@ -203,13 +208,36 @@ const api = {
     }
     const cfg = emptyCfg();
     (rows || []).forEach(r => {
-      if (r.id === "cfg_machines" && r.data) cfg.machines = { repair: r.data.repair || {}, extra: r.data.extra || [] };
+      if (r.id === "cfg_machines" && r.data) cfg.machines = { repair: r.data.repair || {}, extra: r.data.extra || [], repairs: r.data.repairs || [] };
       if (r.id === "cfg_blocked" && r.data) cfg.blocked = { ids: r.data.ids || [] };
     });
     return cfg;
   },
 };
-const emptyCfg = () => ({ machines: { repair: {}, extra: [] }, blocked: { ids: [] } });
+const emptyCfg = () => ({ machines: { repair: {}, extra: [], repairs: [] }, blocked: { ids: [] } });
+
+// Ремонт техники на конкретную дату (по истории ремонтов с датами)
+function findRepair(mcfg, machineId, date) {
+  const list = ((mcfg && mcfg.repairs) || []).filter(r => Number(r.machineId) === Number(machineId));
+  const hit = list.find(r => r.from <= date && (!r.to || date <= r.to));
+  if (hit) return hit;
+  // старая отметка «в ремонте» без дат — считаем текущим ремонтом
+  if (mcfg && mcfg.repair && mcfg.repair[machineId] && !list.some(r => !r.to) && date >= todayStr()) {
+    return { legacy: true, machineId, from: null, to: null };
+  }
+  return null;
+}
+const daysBetween = (a, b) => {
+  const [y1, m1, d1] = a.split("-").map(Number);
+  const [y2, m2, d2] = b.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+};
+const repairDays = r => (r && r.from ? daysBetween(r.from, r.to || todayStr()) + 1 : null);
+const monthsInRange = (from, to) => {
+  const out = [];
+  for (let d = from; d <= to; d = addDays(d, 1)) { const m = monthOf(d); if (!out.includes(m)) out.push(m); }
+  return out;
+};
 
 function splitRows(rows) {
   const reqs = [], reps = {};
@@ -230,7 +258,14 @@ function useRows(kind, key, pollMs) {
     const my = ++seq.current;
     if (!silent) setState(s => ({ ...s, loading: true, error: "" }));
     try {
-      const rows = kind === "date" ? await api.byDate(key) : await api.byMonth(key);
+      let rows;
+      if (kind === "date") rows = await api.byDate(key);
+      else if (kind === "month") rows = await api.byMonth(key);
+      else { // диапазон дат "с|по": грузим нужные месяцы и отбираем даты
+        const [from, to] = key.split("|");
+        const parts = await Promise.all(monthsInRange(from, to).map(m => api.byMonth(m)));
+        rows = parts.flat().filter(r => r.data && r.data.date >= from && r.data.date <= to);
+      }
       if (my !== seq.current) return; // пришёл устаревший ответ — игнорируем
       const { reqs, reps } = splitRows(rows);
       setState({ reqs, reps, loading: false, error: "", key });
@@ -324,8 +359,8 @@ function DateBar({ date, setDate }) {
 }
 
 /* ---------------- форма заявки ---------------- */
-function ReqForm({ initial, date, drivers, machines, repair, dayReqs, lockDriver, onSubmit, onCancel, submitLabel }) {
-  const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: "", time: "08:00", place: "", org: "", note: "" });
+function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriver, presetMachineId, onSubmit, onCancel, submitLabel }) {
+  const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: presetMachineId || "", time: "08:00", place: "", org: "", note: "" });
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
@@ -354,7 +389,11 @@ function ReqForm({ initial, date, drivers, machines, repair, dayReqs, lockDriver
         <Field label="Техника">
           <select style={S.input} value={f.machineId || ""} onChange={e => set("machineId", e.target.value)}>
             <option value="">— без техники —</option>
-            {machines.map(m => <option key={m.id} value={m.id} disabled={!!repair[m.id]}>{m.name}{repair[m.id] ? " (в ремонте)" : ""}</option>)}
+            {machines.map(m => {
+              const rp = repairOf(m.id, f.date || date);
+              const busy = (dayReqs || []).some(r => Number(r.machineId) === m.id && r.id !== f.id && r.date === (f.date || date));
+              return <option key={m.id} value={m.id} disabled={!!rp}>{m.name}{rp ? " (в ремонте)" : busy ? " (уже в плане)" : ""}</option>;
+            })}
           </select>
         </Field>
         <Field label="Время подачи">
@@ -438,7 +477,7 @@ function ReportForm({ req, rep, onSubmit, onCancel }) {
 }
 
 /* ---------------- карточка заявки ---------------- */
-function ReqCard({ req, rep, machines, repair, drivers, dayReqs, me, canEditPlan, onSaveReq, onDeleteReq, onSaveRep, onDeleteRep }) {
+function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPlan, onSaveReq, onDeleteReq, onSaveRep, onDeleteRep }) {
   const [mode, setMode] = useState("view"); // view | edit | report
   const [confirmDel, setConfirmDel] = useState(false);
   const [s, run] = useSaver();
@@ -455,7 +494,7 @@ function ReqCard({ req, rep, machines, repair, drivers, dayReqs, me, canEditPlan
     return (
       <div style={cardStyle}>
         <div style={{ ...S.h2, fontSize: 15 }}>✏️ Изменить заявку</div>
-        <ReqForm initial={req} date={req.date} drivers={drivers} machines={machines} repair={repair} dayReqs={dayReqs}
+        <ReqForm initial={req} date={req.date} drivers={drivers} machines={machines} repairOf={repairOf} dayReqs={dayReqs}
           submitLabel="💾 Сохранить изменения"
           onSubmit={async (f) => { await onSaveReq(f); setMode("view"); }}
           onCancel={() => setMode("view")} />
@@ -535,10 +574,14 @@ function ReqCard({ req, rep, machines, repair, drivers, dayReqs, me, canEditPlan
 }
 
 /* ---------------- план (общий для менеджера и водителя) ---------------- */
-function PlanView({ me, machines, repair, blockedIds, isDriver }) {
-  const [date, setDate] = useState(isDriver ? todayStr() : addDays(todayStr(), 1));
+function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
+  const [date, setDate] = useState(preset ? preset.date : isDriver ? todayStr() : addDays(todayStr(), 1));
   const day = useRows("date", date, 20000);
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(!!preset);
+  // переход из «Техники» с кнопки «➕ Заявка»: открываем форму на нужную дату с этой техникой
+  useEffect(() => {
+    if (preset) { setDate(preset.date); setShowForm(true); }
+  }, [preset]);
   const drivers = USERS.filter(u => u.role === "driver" && !blockedIds.includes(u.id)).sort((a, b) => a.name.localeCompare(b.name, "ru"));
 
   const list = (isDriver ? day.reqs.filter(r => Number(r.driverId) === me.id) : day.reqs)
@@ -595,7 +638,8 @@ function PlanView({ me, machines, repair, blockedIds, isDriver }) {
   const t = todayStr();
   const missingCnt = date < t ? list.length - doneCnt : 0;
   const busyMachineIds = new Set(day.reqs.map(r => Number(r.machineId)).filter(Boolean));
-  const freeMachines = machines.filter(m => !busyMachineIds.has(m.id) && !repair[m.id]);
+  const freeMachines = machines.filter(m => !busyMachineIds.has(m.id) && !repairOf(m.id, date));
+  const repairMachines = machines.filter(m => repairOf(m.id, date));
   const busyDriverIds = new Set(day.reqs.map(r => Number(r.driverId)));
   const freeDrivers = drivers.filter(d => !busyDriverIds.has(d.id));
 
@@ -626,8 +670,9 @@ function PlanView({ me, machines, repair, blockedIds, isDriver }) {
       {showForm && (
         <div style={S.card}>
           <div style={S.h2}>{isDriver ? "➕ Работа без заявки" : "➕ Новая заявка"} · {fmtDay(date)}</div>
-          <ReqForm date={date} drivers={drivers} machines={machines} repair={repair} dayReqs={day.reqs}
+          <ReqForm key={preset ? preset.n + date : date} date={date} drivers={drivers} machines={machines} repairOf={repairOf} dayReqs={day.reqs}
             lockDriver={isDriver ? me.id : null}
+            presetMachineId={preset && preset.date === date ? preset.machineId : ""}
             submitLabel={isDriver ? "💾 Добавить" : "💾 Добавить в план"}
             onSubmit={saveReq} onCancel={() => setShowForm(false)} />
         </div>
@@ -642,7 +687,7 @@ function PlanView({ me, machines, repair, blockedIds, isDriver }) {
       ) : (
         list.map(r => (
           <ReqCard key={r.id} req={r} rep={day.reps[r.id]} me={me}
-            machines={machines} repair={repair} drivers={drivers} dayReqs={day.reqs}
+            machines={machines} repairOf={repairOf} drivers={drivers} dayReqs={day.reqs}
             canEditPlan={!isDriver || Number(r.createdBy) === me.id}
             onSaveReq={saveReq} onDeleteReq={deleteReq} onSaveRep={saveRep} onDeleteRep={deleteRep} />
         ))
@@ -654,10 +699,10 @@ function PlanView({ me, machines, repair, blockedIds, isDriver }) {
           <div>{freeMachines.length ? freeMachines.map(m => <span key={m.id} style={S.tag(C.greenBg, C.green)}>{m.name}</span>) : <span style={S.muted}>вся техника в плане</span>}</div>
           <div style={{ fontWeight: 700, fontSize: 14, margin: "12px 0 4px" }}>👤 Водители без заявок ({freeDrivers.length})</div>
           <div>{freeDrivers.length ? freeDrivers.map(d => <span key={d.id} style={S.tag(C.blueBg, C.blue)}>{shortName(d.id)}</span>) : <span style={S.muted}>все водители в плане</span>}</div>
-          {Object.keys(repair).filter(k => repair[k]).length > 0 && (
+          {repairMachines.length > 0 && (
             <>
               <div style={{ fontWeight: 700, fontSize: 14, margin: "12px 0 4px" }}>🔧 В ремонте</div>
-              <div>{machines.filter(m => repair[m.id]).map(m => <span key={m.id} style={S.tag(C.redBg, C.red)}>{m.name}</span>)}</div>
+              <div>{repairMachines.map(m => <span key={m.id} style={S.tag(C.redBg, C.red)}>{m.name}</span>)}</div>
             </>
           )}
         </div>
@@ -667,7 +712,7 @@ function PlanView({ me, machines, repair, blockedIds, isDriver }) {
 }
 
 /* ---------------- отчёт за месяц ---------------- */
-function ReportView({ machines }) {
+function ReportView({ machines, repairOf }) {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -701,9 +746,32 @@ function ReportView({ machines }) {
       };
     }).sort((a, b) => b.hours - a.hours);
   };
-  const groups = mode === "drivers"
-    ? groupBy(x => String(x.req.driverId)).map(g => ({ ...g, title: userName(g.key) }))
-    : groupBy(x => String(x.req.machineId || 0)).map(g => ({ ...g, title: g.key === "0" ? "Без техники" : mName(g.key) }));
+  // прошедшие дни месяца (включая сегодня) — для подсчёта простоя и ремонта
+  const pastDays = (() => {
+    const n = new Date(year, month, 0).getDate(), out = [];
+    for (let d = 1; d <= n; d++) { const s = `${ym}-${pad(d)}`; if (s <= t) out.push(s); }
+    return out;
+  })();
+  const machineDays = (mid) => {
+    const busy = new Set(rows.filter(x => Number(x.req.machineId) === Number(mid)).map(x => x.req.date));
+    let work = 0, rep = 0, idle = 0;
+    pastDays.forEach(d => { if (busy.has(d)) work++; else if (repairOf(mid, d)) rep++; else idle++; });
+    return { work, rep, idle };
+  };
+  let groups;
+  if (mode === "drivers") {
+    groups = groupBy(x => String(x.req.driverId)).map(g => ({ ...g, title: userName(g.key) }));
+  } else {
+    const byKey = {};
+    groupBy(x => String(x.req.machineId || 0)).forEach(g => { byKey[g.key] = g; });
+    // вся техника, даже без единой заявки за месяц — чтобы был виден простой
+    groups = machines.map(m => {
+      const g = byKey[String(m.id)] || { key: String(m.id), items: [], days: 0, shifts: 0, hours: 0, trips: 0, missing: 0, noWaybill: 0 };
+      return { ...g, title: m.name, md: machineDays(m.id) };
+    });
+    if (byKey["0"]) groups.push({ ...byKey["0"], title: "Без техники" });
+    groups.sort((a, b) => b.hours - a.hours || (b.md ? b.md.work : 0) - (a.md ? a.md.work : 0));
+  }
 
   const csvCell = v => { const s = v === undefined || v === null ? "" : String(v); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const downloadCsv = () => {
@@ -751,7 +819,7 @@ function ReportView({ machines }) {
       </div>
 
       {data.loading && data.key !== ym ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div>
-        : groups.length === 0 ? <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>За {MONTHS[month - 1].toLowerCase()} записей нет</div>
+        : groups.length === 0 || (mode === "drivers" && !rows.length) ? <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>За {MONTHS[month - 1].toLowerCase()} записей нет</div>
         : groups.map(g => (
           <div key={g.key} style={S.card}>
             <div style={{ cursor: "pointer" }} onClick={() => setOpen(o => ({ ...o, [mode + g.key]: !o[mode + g.key] }))}>
@@ -765,6 +833,12 @@ function ReportView({ machines }) {
                 <span style={S.tag(C.orangeBg, C.orange)}>{g.trips} рейс.</span>
                 {g.missing > 0 && <span style={S.tag(C.redBg, C.red)}>⚠️ без отчёта: {g.missing}</span>}
                 {g.noWaybill > 0 && <span style={S.tag(C.redBg, C.red)}>📄 путевой не закрыт: {g.noWaybill}</span>}
+                {g.md && pastDays.length > 0 && (
+                  <>
+                    <span style={S.tag("#eef1f4", C.gray)}>⏸ простой: {g.md.idle} дн.</span>
+                    {g.md.rep > 0 && <span style={S.tag(C.redBg, C.red)}>🔧 ремонт: {g.md.rep} дн.</span>}
+                  </>
+                )}
               </div>
             </div>
             {open[mode + g.key] && (
@@ -787,36 +861,315 @@ function ReportView({ machines }) {
   );
 }
 
-/* ---------------- техника ---------------- */
-function MachinesView({ machines, cfg, saveCfg }) {
-  const [name, setName] = useState("");
+/* ---------------- техника: занятость по датам и ремонты ---------------- */
+const shortMachine = n => n.replace(/\s*\(.*?\)\s*/g, " ").replace(/\s+/g, " ").trim();
+const weekdayOf = s => { const [y, m, d] = s.split("-").map(Number); return WEEKDAYS[new Date(y, m - 1, d).getDay()]; };
+
+function RepairStartForm({ defaultDate, busy, onSave, onCancel }) {
+  const [from, setFrom] = useState(defaultDate);
+  const [note, setNote] = useState("");
+  return (
+    <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: C.redBg, display: "grid", gap: 8 }}>
+      <div style={S.grid2}>
+        <Field label="В ремонте с"><input type="date" style={S.input} value={from} onChange={e => e.target.value && setFrom(e.target.value)} /></Field>
+        <Field label="Что случилось"><input style={S.input} value={note} onChange={e => setNote(e.target.value)} placeholder="Например: течь гидравлики" /></Field>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button style={S.btn(C.red, { flex: "1 1 180px", opacity: busy ? 0.7 : 1 })} disabled={busy} onClick={() => onSave(from, note.trim())}>{busy ? "⏳ Сохраняем…" : "🔧 Поставить в ремонт"}</button>
+        <button style={S.ghost({ padding: "11px 16px" })} onClick={onCancel}>Отмена</button>
+      </div>
+    </div>
+  );
+}
+
+function RepairEndForm({ defaultDate, busy, onSave, onCancel }) {
+  const [back, setBack] = useState(defaultDate);
+  return (
+    <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: C.greenBg, display: "grid", gap: 8 }}>
+      <Field label="Вернулась в работу с"><input type="date" style={S.input} value={back} onChange={e => e.target.value && setBack(e.target.value)} /></Field>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button style={S.btn(C.green, { flex: "1 1 180px", opacity: busy ? 0.7 : 1 })} disabled={busy} onClick={() => onSave(back)}>{busy ? "⏳ Сохраняем…" : "✅ Вышла из ремонта"}</button>
+        <button style={S.ghost({ padding: "11px 16px" })} onClick={onCancel}>Отмена</button>
+      </div>
+    </div>
+  );
+}
+
+function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
+  const [mode, setMode] = useState("day"); // day | week | repairs | list
+  const [date, setDate] = useState(todayStr());
+  const data = useRows("range", `${date}|${addDays(date, 6)}`, 30000);
   const [s, run] = useSaver();
-  const repair = cfg.machines.repair;
-  const toggle = (m) => run(() => saveCfg("machines", c => { c.repair = { ...c.repair, [m.id]: !c.repair[m.id] }; if (!c.repair[m.id]) delete c.repair[m.id]; }));
-  const add = () => {
+  const [formFor, setFormFor] = useState(null); // { kind: "start" | "end", id }
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [name, setName] = useState("");
+  const [newRep, setNewRep] = useState({ machineId: "" });
+  const t = todayStr();
+
+  const reqsOn = (mid, d) => data.reqs
+    .filter(r => Number(r.machineId) === Number(mid) && r.date === d)
+    .sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+  const statusOf = (mid, d) => (repairOf(mid, d) ? "repair" : reqsOn(mid, d).length ? "busy" : "free");
+
+  const startRepair = (mid, from, note) => run(async () => {
+    await saveCfg("machines", c => {
+      c.repairs = [...(c.repairs || []), { id: newId(), machineId: Number(mid), from, to: null, note, by: me.id, at: new Date().toISOString() }];
+      if (c.repair) delete c.repair[mid];
+    });
+    setFormFor(null); setNewRep({ machineId: "" });
+  });
+  const endRepair = (mid, rp, backDate) => run(async () => {
+    await saveCfg("machines", c => {
+      if (c.repair) delete c.repair[mid];
+      if (rp && !rp.legacy) {
+        const last = addDays(backDate, -1);
+        c.repairs = (c.repairs || []).map(r => (r.id === rp.id ? { ...r, to: last < r.from ? r.from : last, closedBy: me.id } : r));
+      }
+    });
+    setFormFor(null);
+  });
+  const deleteRepair = (r) => run(async () => {
+    await saveCfg("machines", c => { c.repairs = (c.repairs || []).filter(x => x.id !== r.id); });
+    setConfirmDel(null);
+  });
+  const addMachine = () => {
     const n = name.trim(); if (!n) return;
     run(async () => { await saveCfg("machines", c => { c.extra = [...(c.extra || []), { id: 1000 + Date.now() % 1000000, name: n }]; }); setName(""); });
   };
-  const remove = (m) => run(() => saveCfg("machines", c => { c.extra = (c.extra || []).filter(x => x.id !== m.id); delete c.repair[m.id]; }));
+  const removeMachine = (m) => run(() => saveCfg("machines", c => { c.extra = (c.extra || []).filter(x => x.id !== m.id); }));
+
+  const modes = [["day", "📍 На дату"], ["week", "🗓 Неделя"], ["repairs", "🔧 Ремонты"], ["list", "⚙️ Список"]];
+  const isPast = date < t;
+  const groups = { free: [], busy: [], repair: [] };
+  machines.forEach(m => groups[statusOf(m.id, date)].push(m));
+  const days = Array.from({ length: 7 }, (_, i) => addDays(date, i));
+  const repairsList = (cfg.machines.repairs || []).slice().sort((a, b) => b.from.localeCompare(a.from));
+  const legacyRepairs = machines.filter(m => cfg.machines.repair && cfg.machines.repair[m.id] && !(cfg.machines.repairs || []).some(r => Number(r.machineId) === m.id && !r.to));
+  const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "Техника #" + id;
+
+  const repairLine = (rp, onDate) => {
+    if (!rp || rp.legacy) return "🔧 В ремонте (дата начала не указана)";
+    const dayN = daysBetween(rp.from, onDate) + 1;
+    return `🔧 В ремонте с ${fmtDate(rp.from)} · ${dayN}-й день${rp.to ? ` (до ${fmtDate(rp.to)})` : ""}`;
+  };
+
+  const freeLabel = isPast ? "⏸ Простой" : "✅ Свободна";
+
   return (
     <div>
-      <div style={S.card}>
-        <div style={S.h2}>🚜 Техника ({machines.length})</div>
-        <div style={S.muted}>Техника «в ремонте» не предлагается при составлении плана.</div>
-        <SaveNote s={s} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6, marginBottom: 10 }}>
+        {modes.map(([k, l]) => (
+          <button key={k} onClick={() => { setMode(k); setFormFor(null); }}
+            style={mode === k ? S.btn(C.dark, { padding: "9px 4px", fontSize: 13 }) : S.ghost({ padding: "9px 4px", fontSize: 13 })}>{l}</button>
+        ))}
       </div>
-      {machines.map(m => (
-        <div key={m.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", borderLeft: `6px solid ${repair[m.id] ? C.red : C.green}` }}>
-          <div style={{ flex: "1 1 200px", fontWeight: 600 }}>{m.name}</div>
-          <span style={S.tag(repair[m.id] ? C.redBg : C.greenBg, repair[m.id] ? C.red : C.green)}>{repair[m.id] ? "🔧 В ремонте" : "✅ В работе"}</span>
-          <button style={S.ghost()} disabled={s.busy} onClick={() => toggle(m)}>{repair[m.id] ? "Вернуть в работу" : "В ремонт"}</button>
-          {m.extra && <button style={S.ghost({ color: C.red })} disabled={s.busy} onClick={() => remove(m)}>🗑</button>}
+
+      {(mode === "day" || mode === "week") && <DateBar date={date} setDate={d => { setDate(d); setFormFor(null); }} />}
+      {data.error && (mode === "day" || mode === "week") && (
+        <div style={{ ...S.card, background: C.redBg, color: C.red, fontSize: 14 }}>⚠️ {data.error} <button style={S.ghost({ marginLeft: 8 })} onClick={() => data.reload(false)}>Обновить</button></div>
+      )}
+      <SaveNote s={s} />
+
+      {mode === "day" && (data.loading && !data.key ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div> : (
+        <div>
+          <div style={{ ...S.card, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", textAlign: "center", padding: 10 }}>
+            <div><div style={{ fontSize: 22, fontWeight: 800, color: isPast ? C.gray : C.green }}>{groups.free.length}</div><div style={S.muted}>{isPast ? "в простое" : "свободно"}</div></div>
+            <div><div style={{ fontSize: 22, fontWeight: 800, color: C.blue }}>{groups.busy.length}</div><div style={S.muted}>в работе</div></div>
+            <div><div style={{ fontSize: 22, fontWeight: 800, color: groups.repair.length ? C.red : C.gray }}>{groups.repair.length}</div><div style={S.muted}>в ремонте</div></div>
+          </div>
+
+          {groups.free.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: isPast ? C.gray : C.green }}>{freeLabel} — {groups.free.length}</div>}
+          {groups.free.map(m => {
+            const next = data.reqs.filter(r => Number(r.machineId) === m.id && r.date > date).map(r => r.date).sort();
+            return (
+              <div key={m.id} data-testid="m-free" style={{ ...S.card, borderLeft: `6px solid ${isPast ? "#b8c2cc" : C.green}`, padding: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ fontWeight: 700, flex: "1 1 200px" }}>{m.name}</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {!isPast && <button style={S.btn(C.blue, { padding: "8px 12px", fontSize: 13 })} onClick={() => onPlan(m.id, date)}>➕ Заявка</button>}
+                    <button style={S.ghost({ color: C.red })} onClick={() => setFormFor({ kind: "start", id: m.id })}>🔧 В ремонт</button>
+                  </div>
+                </div>
+                <div style={{ ...S.muted, fontSize: 12.5, marginTop: 4 }}>
+                  {next.length ? "Дальше в плане: " + [...new Set(next)].slice(0, 4).map(d => fmtDay(d)).join(", ") : "Свободна всю неделю"}
+                </div>
+                {formFor && formFor.kind === "start" && formFor.id === m.id && (
+                  <RepairStartForm defaultDate={date} busy={s.busy} onSave={(from, note) => startRepair(m.id, from, note)} onCancel={() => setFormFor(null)} />
+                )}
+              </div>
+            );
+          })}
+
+          {groups.busy.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: C.blue }}>🚚 В работе — {groups.busy.length}</div>}
+          {groups.busy.map(m => (
+            <div key={m.id} data-testid="m-busy" style={{ ...S.card, borderLeft: `6px solid ${C.blue}`, padding: 12 }}>
+              <div style={{ fontWeight: 700 }}>{m.name}</div>
+              {reqsOn(m.id, date).map(r => {
+                const rep = data.reps[r.id];
+                return (
+                  <div key={r.id} style={{ fontSize: 13.5, marginTop: 6, lineHeight: 1.45 }}>
+                    <b>{r.time || "—"}</b> · {shortName(r.driverId)}
+                    {rep && rep.done && <span style={S.tag(C.greenBg, C.green)}>✅ отработано</span>}
+                    <div style={{ color: "#33414f" }}>{[r.place && "📍 " + r.place, r.org && "🏢 " + r.org].filter(Boolean).join("  ")}</div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+
+          {groups.repair.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: C.red }}>🔧 В ремонте — {groups.repair.length}</div>}
+          {groups.repair.map(m => {
+            const rp = repairOf(m.id, date);
+            return (
+              <div key={m.id} data-testid="m-repair" style={{ ...S.card, borderLeft: `6px solid ${C.red}`, background: "#fff8f7", padding: 12 }}>
+                <div style={{ fontWeight: 700 }}>{m.name}</div>
+                <div style={{ fontSize: 13.5, color: C.red, marginTop: 4 }}>{repairLine(rp, date)}</div>
+                {rp && rp.note && <div style={{ ...S.muted, marginTop: 2 }}>💬 {rp.note}</div>}
+                {!(formFor && formFor.kind === "end" && formFor.id === m.id) && !(rp && rp.to) && (
+                  <button style={S.ghost({ color: C.green, marginTop: 8 })} onClick={() => setFormFor({ kind: "end", id: m.id })}>✅ Вышла из ремонта</button>
+                )}
+                {formFor && formFor.kind === "end" && formFor.id === m.id && (
+                  <RepairEndForm defaultDate={t} busy={s.busy} onSave={back => endRepair(m.id, rp, back)} onCancel={() => setFormFor(null)} />
+                )}
+              </div>
+            );
+          })}
         </div>
       ))}
-      <div style={{ ...S.card, display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <input style={{ ...S.input, flex: "1 1 220px" }} value={name} onChange={e => setName(e.target.value)} placeholder="Новая техника: марка и госномер" />
-        <button style={S.btn()} disabled={s.busy} onClick={add}>➕ Добавить</button>
-      </div>
+
+      {mode === "week" && (
+        <div style={{ ...S.card, padding: 8, overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed", minWidth: 340 }}>
+            <thead>
+              <tr>
+                <th style={{ width: "32%" }}></th>
+                {days.map(d => (
+                  <th key={d} onClick={() => { setDate(d); setMode("day"); }}
+                    style={{ fontSize: 11, padding: "2px 0 6px", cursor: "pointer", fontWeight: d === t ? 800 : 600, color: d === t ? C.blue : C.gray }}>
+                    {weekdayOf(d)}<br />{d.slice(8)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {machines.map(m => (
+                <tr key={m.id}>
+                  <td style={{ fontSize: 11.5, padding: "3px 4px 3px 0", lineHeight: 1.2, borderTop: `1px solid ${C.border}`, wordBreak: "break-word" }}>{shortMachine(m.name)}</td>
+                  {days.map(d => {
+                    const st = statusOf(m.id, d);
+                    const rq = st === "busy" ? reqsOn(m.id, d) : [];
+                    const bg = st === "repair" ? C.red : st === "busy" ? C.blue : d < t ? "#e9edf1" : C.greenBg;
+                    const label = st === "repair" ? "Р" : st === "busy" ? userName(rq[0].driverId).slice(0, 3) + (rq.length > 1 ? "+" : "") : "";
+                    const tip = st === "repair" ? "в ремонте" : st === "busy" ? rq.map(r => `${r.time || ""} ${userName(r.driverId)} ${r.place || r.org || ""}`).join("\n") : d < t ? "простой" : "свободна";
+                    return (
+                      <td key={d} style={{ padding: 2, borderTop: `1px solid ${C.border}` }}>
+                        <div title={`${m.name}, ${fmtDay(d)}: ${tip}`} onClick={() => { setDate(d); setMode("day"); }}
+                          style={{ background: bg, color: st === "free" ? C.green : "#fff", borderRadius: 6, height: 30, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10.5, fontWeight: 700, cursor: "pointer", overflow: "hidden" }}>
+                          {label}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr>
+                <td style={{ fontSize: 11.5, fontWeight: 700, paddingTop: 8 }}>Свободно</td>
+                {days.map(d => (
+                  <td key={d} style={{ textAlign: "center", fontSize: 13, fontWeight: 800, color: d < t ? C.gray : C.green, paddingTop: 8 }}>
+                    {machines.filter(m => statusOf(m.id, d) === "free").length}
+                  </td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12, color: C.gray, marginTop: 10 }}>
+            <span><span style={{ display: "inline-block", width: 12, height: 12, borderRadius: 3, background: C.greenBg, border: `1px solid ${C.greenBorder}`, verticalAlign: -2 }} /> свободна</span>
+            <span><span style={{ display: "inline-block", width: 12, height: 12, borderRadius: 3, background: C.blue, verticalAlign: -2 }} /> в работе (фамилия водителя)</span>
+            <span><span style={{ display: "inline-block", width: 12, height: 12, borderRadius: 3, background: C.red, verticalAlign: -2 }} /> ремонт</span>
+            <span><span style={{ display: "inline-block", width: 12, height: 12, borderRadius: 3, background: "#e9edf1", verticalAlign: -2 }} /> простой (прошло)</span>
+          </div>
+          <div style={{ ...S.muted, fontSize: 12, marginTop: 6 }}>Нажмите на клетку или день — откроется подробно на эту дату.</div>
+        </div>
+      )}
+
+      {mode === "repairs" && (
+        <div>
+          <div style={S.card}>
+            <div style={S.h2}>🔧 Поставить технику в ремонт</div>
+            <Field label="Техника">
+              <select style={S.input} value={newRep.machineId} onChange={e => setNewRep({ machineId: e.target.value })}>
+                <option value="">— выберите —</option>
+                {machines.filter(m => !repairOf(m.id, t)).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              </select>
+            </Field>
+            {newRep.machineId && (
+              <RepairStartForm key={newRep.machineId} defaultDate={t} busy={s.busy}
+                onSave={(from, note) => startRepair(Number(newRep.machineId), from, note)} onCancel={() => setNewRep({ machineId: "" })} />
+            )}
+          </div>
+
+          {legacyRepairs.map(m => (
+            <div key={"legacy" + m.id} style={{ ...S.card, borderLeft: `6px solid ${C.red}` }}>
+              <div style={{ fontWeight: 700 }}>{m.name}</div>
+              <div style={{ fontSize: 13.5, color: C.red }}>🔧 В ремонте (дата начала не указана)</div>
+              {!(formFor && formFor.kind === "end" && formFor.id === m.id)
+                ? <button style={S.ghost({ color: C.green, marginTop: 8 })} onClick={() => setFormFor({ kind: "end", id: m.id })}>✅ Вышла из ремонта</button>
+                : <RepairEndForm defaultDate={t} busy={s.busy} onSave={back => endRepair(m.id, { legacy: true }, back)} onCancel={() => setFormFor(null)} />}
+            </div>
+          ))}
+
+          <div style={{ ...S.h2, fontSize: 15 }}>История ремонтов</div>
+          {repairsList.length === 0 && <div style={{ ...S.card, textAlign: "center", color: C.gray }}>Ремонтов пока не было</div>}
+          {repairsList.map(r => {
+            const open = !r.to;
+            const n = repairDays(r);
+            return (
+              <div key={r.id} data-testid="repair-row" style={{ ...S.card, borderLeft: `6px solid ${open ? C.red : "#b8c2cc"}` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                  <div style={{ fontWeight: 700 }}>{mName(r.machineId)}</div>
+                  <span style={{ ...S.tag(open ? C.redBg : "#eef1f4", open ? C.red : C.gray), marginTop: 0, fontWeight: 700 }}>{open ? `в ремонте ${n}-й день` : `${n} дн.`}</span>
+                </div>
+                <div style={{ fontSize: 13.5, marginTop: 4 }}>{fmtDate(r.from)} — {r.to ? fmtDate(r.to) : "по сей день"}</div>
+                {r.note && <div style={{ ...S.muted, marginTop: 2 }}>💬 {r.note}</div>}
+                {r.by && <div style={{ ...S.muted, fontSize: 12 }}>отметил(а): {shortName(r.by)}</div>}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  {open && !(formFor && formFor.kind === "end" && formFor.id === "r" + r.id) && (
+                    <button style={S.ghost({ color: C.green })} onClick={() => setFormFor({ kind: "end", id: "r" + r.id })}>✅ Вышла из ремонта</button>
+                  )}
+                  {confirmDel !== r.id
+                    ? <button style={S.ghost({ color: C.red })} onClick={() => setConfirmDel(r.id)}>🗑</button>
+                    : <>
+                        <button style={S.btn(C.red, { padding: "8px 12px", fontSize: 13 })} disabled={s.busy} onClick={() => deleteRepair(r)}>Да, удалить запись</button>
+                        <button style={S.ghost()} onClick={() => setConfirmDel(null)}>Нет</button>
+                      </>}
+                </div>
+                {formFor && formFor.kind === "end" && formFor.id === "r" + r.id && (
+                  <RepairEndForm defaultDate={t} busy={s.busy} onSave={back => endRepair(r.machineId, r, back)} onCancel={() => setFormFor(null)} />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {mode === "list" && (
+        <div>
+          <div style={S.card}>
+            <div style={S.h2}>⚙️ Список техники ({machines.length})</div>
+            <div style={S.muted}>Здесь можно добавить новую технику или убрать добавленную.</div>
+          </div>
+          {machines.map(m => (
+            <div key={m.id} style={{ ...S.card, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: 12 }}>
+              <div style={{ flex: "1 1 200px", fontWeight: 600 }}>{m.name}</div>
+              {m.extra && <button style={S.ghost({ color: C.red })} disabled={s.busy} onClick={() => removeMachine(m)}>🗑 Убрать</button>}
+            </div>
+          ))}
+          <div style={{ ...S.card, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input style={{ ...S.input, flex: "1 1 220px" }} value={name} onChange={e => setName(e.target.value)} placeholder="Новая техника: марка и госномер" />
+            <button style={S.btn()} disabled={s.busy} onClick={addMachine}>➕ Добавить</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -898,6 +1251,7 @@ export default function App() {
   const [me, setMe] = useState(() => { const id = Number(lsGet("m5_user")); return USERS.find(u => u.id === id) || null; });
   const [cfg, setCfg] = useState(emptyCfg);
   const [tab, setTab] = useState("plan");
+  const [planPreset, setPlanPreset] = useState(null);
   const online = useNet();
 
   const loadCfg = useCallback(async () => {
@@ -929,7 +1283,8 @@ export default function App() {
   if (!me) return <Login blockedIds={cfg.blocked.ids} onLogin={login} />;
 
   const machines = [...MACHINES, ...(cfg.machines.extra || []).map(m => ({ ...m, extra: true }))];
-  const repair = cfg.machines.repair || {};
+  const repairOf = (mid, d) => findRepair(cfg.machines, mid, d);
+  const goPlan = (machineId, d) => { setPlanPreset({ machineId, date: d, n: Date.now() }); setTab("plan"); };
   const isDriver = me.role === "driver";
   const tabs = isDriver ? [] : [
     ["plan", "📅 План"], ["report", "📊 Отчёт"], ["machines", "🚜 Техника"],
@@ -961,7 +1316,7 @@ export default function App() {
         <div style={{ background: "#fff", borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, zIndex: 5 }}>
           <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", overflowX: "auto" }}>
             {tabs.map(([k, l]) => (
-              <button key={k} onClick={() => setTab(k)} style={{
+              <button key={k} onClick={() => { setTab(k); setPlanPreset(null); }} style={{
                 flex: "1 0 auto", background: "none", border: "none", padding: "12px 14px", cursor: "pointer", fontSize: 14.5, fontFamily: "inherit",
                 fontWeight: tab === k ? 800 : 500, color: tab === k ? C.blue : C.gray,
                 borderBottom: tab === k ? `3px solid ${C.blue}` : "3px solid transparent",
@@ -974,10 +1329,10 @@ export default function App() {
       <div style={S.wrap}>
         {isDriver && <div style={{ ...S.h2, marginTop: 6 }}>Мои заявки</div>}
         {(isDriver || tab === "plan") && (
-          <PlanView me={me} machines={machines} repair={repair} blockedIds={cfg.blocked.ids} isDriver={isDriver} />
+          <PlanView me={me} machines={machines} repairOf={repairOf} blockedIds={cfg.blocked.ids} isDriver={isDriver} preset={isDriver ? null : planPreset} />
         )}
-        {!isDriver && tab === "report" && <ReportView machines={machines} />}
-        {!isDriver && tab === "machines" && <MachinesView machines={machines} cfg={cfg} saveCfg={saveCfg} />}
+        {!isDriver && tab === "report" && <ReportView machines={machines} repairOf={repairOf} />}
+        {!isDriver && tab === "machines" && <MachinesView me={me} machines={machines} cfg={cfg} saveCfg={saveCfg} repairOf={repairOf} onPlan={goPlan} />}
         {!isDriver && tab === "people" && me.role === "manager" && <PeopleView me={me} cfg={cfg} saveCfg={saveCfg} />}
       </div>
     </div>
