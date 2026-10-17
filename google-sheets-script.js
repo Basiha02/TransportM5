@@ -15,7 +15,7 @@ const USERS = {
   3: 'Касымов Руслан Раилевич', 4: 'Мурадымов Марат Хусаинович', 5: 'Нафигин Вадим Шавкатович',
   6: 'Хадыев Марат Саримович', 7: 'Шакиров Марат Рашитович', 8: 'Шахвалеев Роман Рафидович',
   9: 'Абдуллин Рафит Ансарович', 10: 'Абдулин Руслан Марсович', 11: 'Ямалетдинов Рамат Салахетдинович',
-  15: 'Хамматов Фригат', 2: 'Вафин Данил Закирьянович'
+  15: 'Хамматов Фригат', 2: 'Вафин Данил Закирьянович', 17: 'Валитов Артур'
 };
 const MACHINES = {
   1: 'Самосвал ХОВО Н 020 ЕА (774)', 2: 'Самосвал ХОВО О608 ВУ (774)', 3: 'Самосвал ХОВО Н495 ХА (174)',
@@ -83,6 +83,13 @@ function updateM5() {
     else if (r.id === 'cfg_machines') (r.data.extra || []).forEach(function (m) { extraMachines[m.id] = m.name; });
   });
   var user = function (id) { return USERS[Number(id)] || (id ? 'Сотрудник #' + id : ''); };
+  var names = {};
+  reqs.forEach(function (q) {
+    if (q.driverId && q.driverName) names[q.driverId] = q.driverName;
+    if (q.createdBy && q.createdByName) names[q.createdBy] = q.createdByName;
+  });
+  var userOrig = user;
+  user = function (id) { return names[id] || userOrig(id); };
   var machine = function (id) { return !id ? 'без техники' : (MACHINES[Number(id)] || extraMachines[id] || 'Техника #' + id); };
   var monthName = function (ym) { var p = String(ym || '').split('-'); return p.length === 2 ? MONTHS[Number(p[1]) - 1] + ' ' + p[0] : ''; };
   var today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');

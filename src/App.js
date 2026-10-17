@@ -31,6 +31,7 @@ const USERS = [
   { id: 11, name: "Ямалетдинов Рамат Салахетдинович", role: "driver",     pin: "0010" },
   { id: 15, name: "Хамматов Фригат",                  role: "driver",     pin: "0014" },
   { id: 2,  name: "Вафин Данил Закирьянович",         role: "driver",     pin: "0016" },
+  { id: 17, name: "Валитов Артур",                    role: "driver",     pin: "0017" },
 ];
 
 const MACHINES = [
@@ -772,6 +773,7 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
       place: f.place, org: f.org, note: f.note,
       createdBy: old ? old.createdBy : me.id, createdAt: old ? old.createdAt : new Date().toISOString(),
       updatedBy: me.id, updatedAt: new Date().toISOString(),
+      driverName: userName(f.driverId), createdByName: old ? (old.createdByName || userName(old.createdBy)) : me.name, updatedByName: me.name,
     };
     await api.put(id, data);
     // если у заявки уже есть отчёт и поменяли дату/водителя — переносим отчёт вместе с ней
@@ -799,6 +801,7 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
       reqId: req.id, date: req.date, month: monthOf(req.date), driverId: Number(req.driverId), machineId: req.machineId,
       from: f.from, to: f.to, hours: f.hours, trips: f.trips, route: f.route, comment: f.comment, waybill: !!f.waybill,
       done: true, savedBy: me.id, savedAt: new Date().toISOString(),
+      driverName: userName(req.driverId), savedByName: me.name,
     };
     await api.put(id, data);
     day.applyLocal(st => { st.reps[req.id] = { ...data, id }; });
