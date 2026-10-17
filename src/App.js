@@ -1115,9 +1115,17 @@ function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
 
   const modes = [["day", "📍 На дату"], ["week", "🗓 Неделя"], ["repairs", "🔧 Ремонты"], ["list", "⚙️ Список"]];
   const isPast = date < t;
+  const days = Array.from({ length: 7 }, (_, i) => addDays(date, i));
   const groups = { free: [], busy: [], repair: [] };
   machines.forEach(m => groups[statusOf(m.id, date)].push(m));
-  const days = Array.from({ length: 7 }, (_, i) => addDays(date, i));
+  const firstTime = m => ((reqsOn(m.id, date)[0] || {}).time || "99:99");
+  groups.busy.sort((a, b) => firstTime(a).localeCompare(firstTime(b)));
+  // неделя: сверху самая загруженная техника, внизу — простой и ремонт
+  const weekOrder = machines.map((m, i) => {
+    let busy = 0, rep = 0;
+    days.forEach(d => { const st = statusOf(m.id, d); if (st === "busy") busy++; else if (st === "repair") rep++; });
+    return { m, i, busy, rep };
+  }).sort((a, b) => b.busy - a.busy || a.rep - b.rep || a.i - b.i).map(x => x.m);
   const repairsList = (cfg.machines.repairs || []).slice().sort((a, b) => b.from.localeCompare(a.from));
   const legacyRepairs = machines.filter(m => cfg.machines.repair && cfg.machines.repair[m.id] && !(cfg.machines.repairs || []).some(r => Number(r.machineId) === m.id && !r.to));
   const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "Техника #" + id;
@@ -1148,10 +1156,27 @@ function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
       {mode === "day" && (data.loading && !data.key ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div> : (
         <div>
           <div style={{ ...S.card, display: "grid", gridTemplateColumns: "repeat(3, 1fr)", textAlign: "center", padding: 10 }}>
-            <div><div style={{ fontSize: 22, fontWeight: 800, color: isPast ? C.gray : C.green }}>{groups.free.length}</div><div style={S.muted}>{isPast ? "в простое" : "свободно"}</div></div>
             <div><div style={{ fontSize: 22, fontWeight: 800, color: C.blue }}>{groups.busy.length}</div><div style={S.muted}>в работе</div></div>
+            <div><div style={{ fontSize: 22, fontWeight: 800, color: isPast ? C.gray : C.green }}>{groups.free.length}</div><div style={S.muted}>{isPast ? "в простое" : "свободно"}</div></div>
             <div><div style={{ fontSize: 22, fontWeight: 800, color: groups.repair.length ? C.red : C.gray }}>{groups.repair.length}</div><div style={S.muted}>в ремонте</div></div>
           </div>
+
+          {groups.busy.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: C.blue }}>🚚 В работе — {groups.busy.length}</div>}
+          {groups.busy.map(m => (
+            <div key={m.id} data-testid="m-busy" style={{ ...S.card, borderLeft: `6px solid ${C.blue}`, padding: 12 }}>
+              <div style={{ fontWeight: 700 }}>{m.name}</div>
+              {reqsOn(m.id, date).map(r => {
+                const rep = data.reps[r.id];
+                return (
+                  <div key={r.id} style={{ fontSize: 13.5, marginTop: 6, lineHeight: 1.45 }}>
+                    <b>{r.time || "—"}</b> · {shortName(r.driverId)}
+                    {rep && rep.done && <span style={S.tag(C.greenBg, C.green)}>✅ отработано</span>}
+                    <div style={{ color: "#33414f" }}>{[r.place && "📍 " + r.place, r.org && "🏢 " + r.org].filter(Boolean).join("  ")}</div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
 
           {groups.free.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: isPast ? C.gray : C.green }}>{freeLabel} — {groups.free.length}</div>}
           {groups.free.map(m => {
@@ -1174,23 +1199,6 @@ function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
               </div>
             );
           })}
-
-          {groups.busy.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: C.blue }}>🚚 В работе — {groups.busy.length}</div>}
-          {groups.busy.map(m => (
-            <div key={m.id} data-testid="m-busy" style={{ ...S.card, borderLeft: `6px solid ${C.blue}`, padding: 12 }}>
-              <div style={{ fontWeight: 700 }}>{m.name}</div>
-              {reqsOn(m.id, date).map(r => {
-                const rep = data.reps[r.id];
-                return (
-                  <div key={r.id} style={{ fontSize: 13.5, marginTop: 6, lineHeight: 1.45 }}>
-                    <b>{r.time || "—"}</b> · {shortName(r.driverId)}
-                    {rep && rep.done && <span style={S.tag(C.greenBg, C.green)}>✅ отработано</span>}
-                    <div style={{ color: "#33414f" }}>{[r.place && "📍 " + r.place, r.org && "🏢 " + r.org].filter(Boolean).join("  ")}</div>
-                  </div>
-                );
-              })}
-            </div>
-          ))}
 
           {groups.repair.length > 0 && <div style={{ ...S.h2, fontSize: 15, color: C.red }}>🔧 В ремонте — {groups.repair.length}</div>}
           {groups.repair.map(m => {
@@ -1227,7 +1235,7 @@ function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
               </tr>
             </thead>
             <tbody>
-              {machines.map(m => (
+              {weekOrder.map(m => (
                 <tr key={m.id}>
                   <td style={{ fontSize: 11.5, padding: "3px 4px 3px 0", lineHeight: 1.2, borderTop: `1px solid ${C.border}`, wordBreak: "break-word" }}>{shortMachine(m.name)}</td>
                   {days.map(d => {
