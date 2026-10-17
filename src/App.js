@@ -18,7 +18,7 @@ const USERS = [
   { id: 13, name: "Хамматов Эдуард Фригатович",       role: "manager",    pin: "0001" },
   { id: 12, name: "Хамматов Ринат Фригатович",        role: "supervisor", pin: "0011" },
   { id: 14, name: "Салахова Зимфира Маратовна",       role: "supervisor", pin: "0013" },
-  { id: 16, name: "Оля",                              role: "supervisor", pin: "0015" },
+  { id: 16, name: "Абдрахманова Ольга",               role: "supervisor", pin: "0015" },
   { id: 3,  name: "Касымов Руслан Раилевич",          role: "driver",     pin: "0002" },
   { id: 4,  name: "Мурадымов Марат Хусаинович",       role: "driver",     pin: "0003" },
   { id: 5,  name: "Нафигин Вадим Шавкатович",         role: "driver",     pin: "0004" },
@@ -138,14 +138,16 @@ async function sbFetch(path, opts = {}) {
 }
 
 /* --- демо-режим (только для предпросмотра, база не затрагивается) --- */
-const DEMO_KEY = "m5_demo_rows_v2";
+const DEMO_KEY = "m5_demo_rows_v3";
 let demoRows = null;
 function demoSeed() {
   const t = todayStr(), y = addDays(t, -1), tm = addDays(t, 1);
   const rows = {};
+  const authors = [14, 1, 13, 12, 16];
+  let n = 0;
   const add = (date, driverId, machineId, time, place, org, note, rep) => {
     const id = "req_demo" + newId();
-    rows[id] = { date, month: monthOf(date), driverId, machineId, time, place, org, note, createdBy: 1, createdAt: new Date().toISOString() };
+    rows[id] = { date, month: monthOf(date), driverId, machineId, time, place, org, note, createdBy: authors[n++ % authors.length], createdAt: new Date().toISOString() };
     if (rep) rows["rep_" + id] = { reqId: id, date, month: monthOf(date), driverId, machineId, ...rep, hours: calcHours(rep.from, rep.to), done: true, savedBy: driverId, savedAt: new Date().toISOString() };
   };
   add(y, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40", { from: "08:00", to: "17:30", trips: 6, route: "Карьер → Линейная", comment: "", waybill: true });
@@ -478,8 +480,17 @@ function ReqCard({ req, rep, machines, repair, drivers, dayReqs, me, canEditPlan
         {req.place && <div>📍 {req.place}</div>}
         {req.org && <div>🏢 {req.org}</div>}
         {req.note && <div style={{ color: C.gray }}>💬 {req.note}</div>}
-        {Number(req.createdBy) === Number(req.driverId) && <div style={{ ...S.muted, fontSize: 12 }}>добавлено водителем</div>}
       </div>
+      {req.createdBy && (
+        <div data-testid="author" style={{ marginTop: 8, padding: "7px 10px", borderRadius: 8, background: done ? "#fff" : C.purpleBg, color: C.purple, fontSize: 13.5, lineHeight: 1.45 }}>
+          {Number(req.createdBy) === Number(req.driverId)
+            ? <>👤 Добавил сам водитель</>
+            : <>📞 Заявку внёс(ла): <b>{userName(req.createdBy)}</b></>}
+          {req.updatedBy && Number(req.updatedBy) !== Number(req.createdBy) && (
+            <div style={{ fontSize: 12.5 }}>✏️ Изменил(а): {userName(req.updatedBy)}</div>
+          )}
+        </div>
+      )}
 
       {done && mode !== "report" && (
         <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.greenBorder}` }}>
@@ -696,9 +707,9 @@ function ReportView({ machines }) {
 
   const csvCell = v => { const s = v === undefined || v === null ? "" : String(v); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const downloadCsv = () => {
-    const head = ["Дата", "Водитель", "Техника", "Время подачи", "Объект", "Заказчик", "Статус", "С", "До", "Часы", "Рейсы", "Маршрут", "Путевой закрыт", "Комментарий водителя"];
+    const head = ["Дата", "Водитель", "Техника", "Время подачи", "Объект", "Заказчик", "Заявку внёс", "Статус", "С", "До", "Часы", "Рейсы", "Маршрут", "Путевой закрыт", "Комментарий водителя"];
     const lines = rows.map(({ req, rep }) => [
-      fmtDate(req.date), userName(req.driverId), mName(req.machineId), req.time, req.place, req.org,
+      fmtDate(req.date), userName(req.driverId), mName(req.machineId), req.time, req.place, req.org, req.createdBy ? userName(req.createdBy) : "",
       rep?.done ? "Отработано" : req.date < t ? "Нет отчёта" : "В плане",
       rep?.from, rep?.to, rep?.hours ? String(rep.hours).replace(".", ",") : "", rep?.trips, rep?.route,
       rep?.done ? (rep.waybill ? "да" : "нет") : "", rep?.comment,
@@ -762,6 +773,7 @@ function ReportView({ machines }) {
                   <div key={req.id} style={{ padding: "8px 0", borderTop: `1px solid ${C.border}`, fontSize: 13.5, lineHeight: 1.5 }}>
                     <b>{fmtDate(req.date)}</b> · {mode === "drivers" ? mName(req.machineId) : userName(req.driverId)}
                     <div style={{ color: "#33414f" }}>{[req.place, req.org].filter(Boolean).join(" · ")}</div>
+                    {req.createdBy && <div style={{ color: C.purple, fontSize: 12.5 }}>внёс(ла): {shortName(req.createdBy)}</div>}
                     {rep?.done
                       ? <div style={{ color: C.green }}>✅ {rep.from}–{rep.to} ({rep.hours} ч){Number(rep.trips) ? `, ${rep.trips} рейс.` : ""}{rep.route ? `, ${rep.route}` : ""}{rep.waybill ? "" : " · путевой не закрыт"}</div>
                       : <div style={{ color: req.date < t ? C.red : C.gray }}>{req.date < t ? "⚠️ отчёт не заполнен" : "⏳ в плане"}</div>}
