@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { parseVoiceRequest } from "./voice";
 
 /* =====================================================================
    Транспорт М5 — план работ и отчёты водителей
@@ -308,6 +309,76 @@ function useSaver() {
   return [s, run];
 }
 
+/* ---------------- голосовой ввод (Chrome, Android, iPhone Safari) ---------------- */
+const SpeechRec = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition || null) : null;
+const IS_ANDROID = typeof navigator !== "undefined" && /android/i.test(navigator.userAgent || "");
+const SPEECH_ERRORS = {
+  "not-allowed": "Нет доступа к микрофону. Разрешите его: значок 🔒 слева от адреса сайта → Микрофон → Разрешить, и нажмите 🎤 ещё раз.",
+  "service-not-allowed": "Браузер запретил распознавание речи. Откройте приложение в Google Chrome.",
+  "network": "Нет связи с сервисом распознавания речи. Проверьте интернет или откройте приложение в Google Chrome.",
+  "audio-capture": "Микрофон не найден. Проверьте, что он подключён и включён.",
+  "no-speech": "Ничего не услышала. Нажмите 🎤 и говорите чуть громче и ближе к микрофону.",
+  "language-not-supported": "Браузер не распознаёт русскую речь. Откройте приложение в Google Chrome.",
+  "unsupported": "Этот браузер не умеет распознавать речь. Откройте приложение в Google Chrome или продиктуйте через 🎤 на клавиатуре телефона.",
+  "start": "Не удалось включить микрофон. Попробуйте ещё раз.",
+};
+
+function useSpeech() {
+  const [st, setSt] = useState({ on: false, text: "", error: "" });
+  const ref = useRef({ rec: null, stop: false, committed: "", startedAt: 0 });
+  useEffect(() => () => {
+    const r = ref.current; r.stop = true;
+    if (r.rec) { try { r.rec.abort(); } catch (e) { /* уже остановлено */ } }
+  }, []);
+  const stop = useCallback(() => {
+    const r = ref.current; r.stop = true;
+    if (r.rec) { try { r.rec.stop(); } catch (e) { /* уже остановлено */ } }
+  }, []);
+  const start = useCallback((onDone, keepListening) => {
+    if (!SpeechRec) { setSt({ on: false, text: "", error: "unsupported" }); return; }
+    const r = ref.current;
+    r.stop = false; r.committed = ""; r.startedAt = Date.now();
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true; r.rec = null;
+      setSt(x => ({ ...x, on: false, text: r.committed }));
+      onDone(r.committed);
+    };
+    const launch = () => {
+      const rec = new SpeechRec();
+      rec.lang = "ru-RU"; rec.interimResults = true; rec.maxAlternatives = 1;
+      rec.continuous = !!keepListening && !IS_ANDROID;
+      let session = "";
+      rec.onresult = e => {
+        let txt = "";
+        for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript + " ";
+        session = txt.replace(/\s+/g, " ").trim();
+        setSt(x => ({ ...x, text: (r.committed + " " + session).trim() }));
+      };
+      rec.onerror = e => {
+        if (e.error === "aborted") return;
+        if (e.error === "no-speech" && (r.committed || session)) return; // пауза после слов — не ошибка
+        r.stop = true;
+        setSt(x => ({ ...x, error: e.error || "start" }));
+      };
+      rec.onend = () => {
+        r.committed = (r.committed + " " + session).trim();
+        // распознавание обрывается после паузы — слушаем дальше, пока человек говорит или не нажал «Готово»
+        if (keepListening && !r.stop && session && Date.now() - r.startedAt < 120000) {
+          try { launch(); return; } catch (err) { /* не получилось перезапустить — завершаем */ }
+        }
+        finish();
+      };
+      r.rec = rec;
+      rec.start();
+    };
+    setSt({ on: true, text: "", error: "" });
+    try { launch(); } catch (e) { setSt({ on: false, text: "", error: "start" }); }
+  }, []);
+  return { ...st, supported: !!SpeechRec, start, stop };
+}
+
 /* ---------------- стили ---------------- */
 const C = {
   blue: "#2d6a9f", dark: "#1e3a5f", green: "#27ae60", greenBg: "#e6f6ec", greenBorder: "#9fd8b4",
@@ -358,12 +429,133 @@ function DateBar({ date, setDate }) {
   );
 }
 
+/* ---------------- поле с микрофоном ---------------- */
+const micBtn = on => ({
+  flex: "0 0 auto", width: 46, borderRadius: 9, border: on ? "none" : `1px solid ${C.border}`,
+  background: on ? C.red : "#fff", color: on ? "#fff" : C.purple, fontSize: 19, cursor: "pointer",
+  animation: on ? "m5pulse 1.4s infinite" : "none",
+});
+
+function MicInput({ value, onChange, placeholder }) {
+  const sp = useSpeech();
+  const base = useRef("");
+  const click = () => {
+    if (sp.on) { sp.stop(); return; }
+    base.current = (value || "").trim();
+    sp.start(t => { if (t) onChange((base.current ? base.current + " " : "") + t); }, false);
+  };
+  const shown = sp.on && sp.text ? (base.current ? base.current + " " : "") + sp.text : value;
+  return (
+    <span style={{ display: "block" }}>
+      <span style={{ display: "flex", gap: 6 }}>
+        <input style={{ ...S.input, flex: 1, minWidth: 0 }} value={shown} readOnly={sp.on}
+          onChange={e => onChange(e.target.value)} placeholder={sp.on ? "Говорите…" : placeholder} />
+        {sp.supported && (
+          <button type="button" onClick={click} style={micBtn(sp.on)} title={sp.on ? "Закончить" : "Надиктовать голосом"}
+            aria-label={sp.on ? "Закончить диктовку" : "Надиктовать голосом"}>{sp.on ? "⏹" : "🎤"}</button>
+        )}
+      </span>
+      {sp.error && <span style={{ display: "block", fontSize: 12, color: C.red, marginTop: 4 }}>{SPEECH_ERRORS[sp.error] || "Ошибка микрофона: " + sp.error}</span>}
+    </span>
+  );
+}
+
+/* ---------------- заявка голосом ---------------- */
+function VoicePanel({ getCtx, onParsed, machines }) {
+  const sp = useSpeech();
+  const [text, setText] = useState("");
+  const [result, setResult] = useState(null);
+  const parse = t => {
+    const r = parseVoiceRequest(t, getCtx());
+    setResult(r);
+    onParsed(r);
+  };
+  const dictate = () => {
+    if (sp.on) { sp.stop(); return; }
+    const before = text.trim();
+    sp.start(t => {
+      if (!t) return;
+      const full = (before ? before + " " : "") + t;
+      setText(full);
+      parse(full);
+    }, true);
+  };
+  const shown = sp.on ? (text.trim() ? text.trim() + " " : "") + sp.text : text;
+  const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "";
+  const chips = result ? [
+    result.date && "📅 " + fmtDay(result.date),
+    result.time && "🕗 " + result.time,
+    result.driverId && "👤 " + shortName(result.driverId),
+    result.machineId && "🚜 " + mName(result.machineId),
+    result.place && "📍 " + result.place,
+    result.org && "🏢 " + result.org,
+    result.note && "💬 " + result.note,
+  ].filter(Boolean) : [];
+
+  return (
+    <div data-testid="voice-panel" style={{ border: `1.5px dashed ${C.purple}`, background: "#faf5fe", borderRadius: 12, padding: 12, display: "grid", gap: 8 }}>
+      {sp.supported ? (
+        <button type="button" onClick={dictate}
+          style={S.btn(sp.on ? C.red : C.purple, { width: "100%", fontSize: 16, padding: 13, animation: sp.on ? "m5pulse 1.4s infinite" : "none" })}>
+          {sp.on ? "⏹ Готово" : text.trim() ? "🎤 Дополнить голосом" : "🎤 Надиктовать заявку"}
+        </button>
+      ) : (
+        <div style={{ fontWeight: 700, color: C.purple }}>🎤 Заявка голосом</div>
+      )}
+      {sp.on && <div style={{ color: C.red, fontWeight: 700, fontSize: 14 }}>● Слушаю… Говорите, а в конце нажмите «Готово»</div>}
+      {!sp.on && !text && (
+        <div style={{ fontSize: 13, color: "#5b4a6b", lineHeight: 1.45 }}>
+          {sp.supported
+            ? "Скажите одной фразой, например: «Завтра Касымов, самосвал 020, к 8 утра, карьер на Линейной 98, заказчик СтройМонтаж, везти щебень». Поля ниже заполнятся сами — проверьте и сохраните."
+            : "Нажмите на поле ниже и продиктуйте заявку через 🎤 на клавиатуре телефона (или напишите), затем нажмите «Заполнить поля». Например: «Завтра Касымов, самосвал 020, к 8 утра, карьер на Линейной 98, заказчик СтройМонтаж»."}
+        </div>
+      )}
+      <textarea rows={sp.on || text ? 3 : 2} value={shown} readOnly={sp.on}
+        onChange={e => { setText(e.target.value); setResult(null); }}
+        placeholder={sp.supported ? "Здесь появится то, что вы сказали — текст можно поправить" : "Продиктуйте или напишите заявку сюда"}
+        style={{ ...S.input, resize: "vertical", fontSize: 15, lineHeight: 1.4, fontFamily: "inherit" }} />
+      {!sp.on && text.trim() && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" style={S.btn(C.purple, { flex: "1 1 200px", fontSize: 14, padding: "10px 12px" })} onClick={() => parse(text)}>
+            {result ? "🔁 Разобрать текст заново" : "✨ Заполнить поля из текста"}
+          </button>
+          <button type="button" style={S.ghost({ padding: "10px 12px" })} onClick={() => { setText(""); setResult(null); }}>Очистить</button>
+        </div>
+      )}
+      {chips.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12.5, color: C.gray, fontWeight: 600 }}>Заполнено из голоса — проверьте поля ниже:</div>
+          {chips.map(c => <span key={c} style={S.tag(C.greenBg, C.green)}>{c}</span>)}
+        </div>
+      )}
+      {result && !chips.length && <div style={{ fontSize: 13, color: C.orange }}>Не удалось ничего разобрать — попробуйте сказать по-другому или заполните поля вручную.</div>}
+      {result && result.warnings.map(w => <div key={w} style={{ fontSize: 13, color: C.orange }}>{w}</div>)}
+      {sp.error && <div style={{ fontSize: 13, color: C.red }}>{SPEECH_ERRORS[sp.error] || "Ошибка микрофона: " + sp.error}</div>}
+    </div>
+  );
+}
+
 /* ---------------- форма заявки ---------------- */
 function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriver, presetMachineId, onSubmit, onCancel, submitLabel }) {
   const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: presetMachineId || "", time: "08:00", place: "", org: "", note: "" });
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
+  const [voiceKey, setVoiceKey] = useState(0);
+  const voiceCtx = () => ({
+    today: todayStr(), baseDate: f.date || date, drivers, machines, lockDriver, repairOf,
+    isFree: (id, d) => !repairOf(id, d) && !(dayReqs || []).some(r => Number(r.machineId) === Number(id) && r.date === d && r.id !== f.id),
+  });
+  const applyVoice = r => setF(x => ({
+    ...x,
+    ...(r.date ? { date: r.date } : {}),
+    ...(r.time ? { time: r.time } : {}),
+    ...(r.driverId && !lockDriver ? { driverId: r.driverId } : {}),
+    ...(r.machineId ? { machineId: r.machineId } : {}),
+    ...(r.place ? { place: r.place } : {}),
+    ...(r.org ? { org: r.org } : {}),
+    ...(r.note ? { note: r.note } : {}),
+  }));
   const busyMachine = f.machineId && (dayReqs || []).find(r => Number(r.machineId) === Number(f.machineId) && r.id !== f.id && r.date === f.date);
   const busyDriver = f.driverId && (dayReqs || []).find(r => Number(r.driverId) === Number(f.driverId) && r.id !== f.id && r.date === f.date);
 
@@ -372,11 +564,12 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
     if (!f.place.trim() && !f.org.trim()) return setErr("Укажите, куда ехать или заказчика");
     setErr("");
     const ok = await run(() => onSubmit({ ...f, driverId: Number(f.driverId), machineId: f.machineId ? Number(f.machineId) : null, place: f.place.trim(), org: f.org.trim(), note: f.note.trim() }));
-    if (ok && !initial) setF(x => ({ ...x, place: "", org: "", note: "", machineId: "", driverId: lockDriver || "" }));
+    if (ok && !initial) { setF(x => ({ ...x, place: "", org: "", note: "", machineId: "", driverId: lockDriver || "" })); setVoiceKey(k => k + 1); }
   };
 
   return (
     <div style={{ display: "grid", gap: 10 }}>
+      {!initial && <VoicePanel key={voiceKey} getCtx={voiceCtx} onParsed={applyVoice} machines={machines} />}
       <div style={S.grid2}>
         {!lockDriver && (
           <Field label="Водитель *">
@@ -399,21 +592,20 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
         <Field label="Время подачи">
           <input type="time" style={S.input} value={f.time} onChange={e => set("time", e.target.value)} />
         </Field>
-        {initial && (
-          <Field label="Дата">
-            <input type="date" style={S.input} value={f.date} onChange={e => e.target.value && set("date", e.target.value)} />
-          </Field>
-        )}
+        <Field label="Дата">
+          <input type="date" style={S.input} value={f.date} onChange={e => e.target.value && set("date", e.target.value)} />
+        </Field>
       </div>
       <Field label="Куда / объект">
-        <input style={S.input} value={f.place} onChange={e => set("place", e.target.value)} placeholder="Адрес или название объекта" />
+        <MicInput value={f.place} onChange={v => set("place", v)} placeholder="Адрес или название объекта" />
       </Field>
       <Field label="Заказчик">
-        <input style={S.input} value={f.org} onChange={e => set("org", e.target.value)} placeholder="Организация" />
+        <MicInput value={f.org} onChange={v => set("org", v)} placeholder="Организация" />
       </Field>
       <Field label="Комментарий для водителя">
-        <input style={S.input} value={f.note} onChange={e => set("note", e.target.value)} placeholder="Что везти, контакт на месте…" />
+        <MicInput value={f.note} onChange={v => set("note", v)} placeholder="Что везти, контакт на месте…" />
       </Field>
+      {!initial && f.date !== date && <div style={{ ...S.muted, color: C.purple }}>📅 Заявка будет записана на {fmtDay(f.date)}</div>}
       {busyMachine && <div style={{ ...S.muted, color: C.orange }}>⚠️ Эта техника на эту дату уже стоит в плане: {shortName(busyMachine.driverId)}, {busyMachine.time || "время не указано"}</div>}
       {busyDriver && !lockDriver && <div style={{ ...S.muted, color: C.orange }}>ℹ️ У водителя на эту дату уже есть заявка ({busyDriver.time || "без времени"}, {busyDriver.place || busyDriver.org})</div>}
       {err && <div style={{ color: C.red, fontSize: 13 }}>{err}</div>}
@@ -455,10 +647,10 @@ function ReportForm({ req, rep, onSubmit, onCancel }) {
       </div>
       {hours > 0 && <div style={{ fontSize: 14, color: C.dark }}>Итого: <b>{hours} ч</b></div>}
       <Field label="Маршрут / что делал">
-        <input style={S.input} value={f.route} onChange={e => set("route", e.target.value)} placeholder="Например: Карьер → ул. Линейная" />
+        <MicInput value={f.route} onChange={v => set("route", v)} placeholder="Например: Карьер → ул. Линейная" />
       </Field>
       <Field label="Комментарий">
-        <input style={S.input} value={f.comment} onChange={e => set("comment", e.target.value)} placeholder="Простой, поломка, доп. работы…" />
+        <MicInput value={f.comment} onChange={v => set("comment", v)} placeholder="Простой, поломка, доп. работы…" />
       </Field>
       <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 15, cursor: "pointer", padding: "4px 0" }}>
         <input type="checkbox" checked={f.waybill} onChange={e => set("waybill", e.target.checked)} style={{ width: 22, height: 22 }} />
@@ -610,6 +802,7 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
       st.reqs = st.reqs.filter(r => r.id !== id);
       if (data.date === date) st.reqs.push({ ...data, id });
     });
+    if (isNew && data.date !== date) setDate(data.date); // показываем день, на который записали заявку
   };
 
   const deleteReq = async (req) => {
@@ -1293,6 +1486,7 @@ export default function App() {
 
   return (
     <div style={S.page}>
+      <style>{"@keyframes m5pulse{0%{box-shadow:0 0 0 0 rgba(231,76,60,.55)}70%{box-shadow:0 0 0 12px rgba(231,76,60,0)}100%{box-shadow:0 0 0 0 rgba(231,76,60,0)}}"}</style>
       <div style={S.header}>
         <div style={{ maxWidth: 780, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
           <div style={{ minWidth: 0 }}>
