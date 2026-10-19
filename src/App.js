@@ -95,27 +95,34 @@ function isDemo() { try { return typeof window !== "undefined" && window.__M5_DE
 
 // Запрос к Supabase с таймаутом и автоповтором (до 4 попыток).
 // Все записи идемпотентны (запись по id), поэтому повтор безопасен.
+// В России соединения с Cloudflare (через него работает база) иногда «замерзают»:
+// тогда повторяем запрос через адрес с точкой на конце — для браузера это другой
+// сервер, и он открывает НОВОЕ соединение. Рабочий адрес запоминаем.
+const SB_HOSTS = [SUPABASE_URL, SUPABASE_URL + "."];
+const ATTEMPT_TIMEOUTS = [10000, 15000, 20000, 25000];
+let sbHostIdx = 0;
 async function sbFetch(path, opts = {}) {
   const { method = "GET", body, prefer } = opts;
   let useAuth = true;
   let lastErr = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (attempt > 0) await sleep(900 * attempt);
+  for (let attempt = 0; attempt < ATTEMPT_TIMEOUTS.length; attempt++) {
+    if (attempt > 0) await sleep(600 * attempt);
+    const hostIdx = (sbHostIdx + attempt) % SB_HOSTS.length;
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 20000);
+    const timer = setTimeout(() => ctrl.abort(), ATTEMPT_TIMEOUTS[attempt]);
     const headers = { "Content-Type": "application/json", apikey: SUPABASE_KEY };
     if (useAuth) headers.Authorization = `Bearer ${SUPABASE_KEY}`;
     if (prefer) headers.Prefer = prefer;
     let res;
     try {
-      res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      res = await fetch(`${SB_HOSTS[hostIdx]}/rest/v1/${path}`, {
         method, headers, cache: "no-store", signal: ctrl.signal,
         body: body !== undefined ? JSON.stringify(body) : undefined,
       });
     } catch (e) {
       clearTimeout(timer);
       lastErr = new Error(e && e.name === "AbortError"
-        ? "Сервер долго не отвечает (возможно, база «просыпается»). Нажмите ещё раз через минуту."
+        ? "Сервер долго не отвечает. Проверьте интернет и нажмите ещё раз."
         : "Нет связи с сервером. Проверьте интернет и нажмите ещё раз.");
       lastErr.network = true;
       continue;
@@ -124,6 +131,7 @@ async function sbFetch(path, opts = {}) {
     const text = await res.text().catch(() => "");
     if (res.ok) {
       setNet(true);
+      sbHostIdx = hostIdx; // этот адрес отвечает — дальше работаем через него
       if (!text) return null;
       try { return JSON.parse(text); } catch { return null; }
     }
@@ -751,7 +759,7 @@ function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPl
 /* ---------------- план (общий для менеджера и водителя) ---------------- */
 function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
   const [date, setDate] = useState(preset ? preset.date : isDriver ? todayStr() : addDays(todayStr(), 1));
-  const day = useRows("date", date, 20000);
+  const day = useRows("date", date, 30000);
   const [showForm, setShowForm] = useState(!!preset);
   // переход из «Техники» с кнопки «➕ Заявка»: открываем форму на нужную дату с этой техникой
   useEffect(() => {
@@ -1076,7 +1084,7 @@ function RepairEndForm({ defaultDate, busy, onSave, onCancel }) {
 function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
   const [mode, setMode] = useState("day"); // day | week | repairs | list
   const [date, setDate] = useState(todayStr());
-  const data = useRows("range", `${date}|${addDays(date, 6)}`, 30000);
+  const data = useRows("range", `${date}|${addDays(date, 6)}`, 60000);
   const [s, run] = useSaver();
   const [formFor, setFormFor] = useState(null); // { kind: "start" | "end", id }
   const [confirmDel, setConfirmDel] = useState(null);
