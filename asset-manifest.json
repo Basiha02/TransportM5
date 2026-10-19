@@ -1,10 +1,10 @@
 {
   "files": {
-    "main.js": "/TransportM5/static/js/main.9384ce9b.js",
+    "main.js": "/TransportM5/static/js/main.8f8b49d5.js",
     "index.html": "/TransportM5/index.html",
-    "main.9384ce9b.js.map": "/TransportM5/static/js/main.9384ce9b.js.map"
+    "main.8f8b49d5.js.map": "/TransportM5/static/js/main.8f8b49d5.js.map"
   },
   "entrypoints": [
-    "static/js/main.9384ce9b.js"
+    "static/js/main.8f8b49d5.js"
   ]
 }
