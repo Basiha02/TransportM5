@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { parseTimeSpeech, parseMachineSpeech } from "./voice";
+import { BUILD } from "./version";
 
 /* =====================================================================
    Транспорт М5 — план работ и отчёты водителей
@@ -80,72 +81,359 @@ const lsSet = (k, v) => { try { if (v === null) window.localStorage.removeItem(k
 const userName = id => (USERS.find(u => u.id === Number(id)) || {}).name || "—";
 const shortName = id => { const n = userName(id).split(" "); return n.length > 1 ? `${n[0]} ${n[1][0]}.` : n[0]; };
 
-/* ---------------- индикатор связи ---------------- */
+/* =====================================================================
+   СВЯЗЬ С БАЗОЙ
+   Российские провайдеры режут Cloudflare, через который работает Supabase:
+   пропускают ~16 КБ, дальше соединение «замерзает». Поэтому у запроса три пути:
+     direct — напрямую в Supabase;
+     relay  — через Google (веб-приложение Apps Script), Google в России работает;
+     dot    — тот же адрес Supabase с точкой на конце: браузер открывает новое соединение.
+   Запрос идёт по лучшему пути; если ответа нет 3 секунды — параллельно по следующему,
+   побеждает первый ответ. Записи идемпотентны (запись по id), поэтому дубль безопасен.
+   Путь, который завис, на время уходит в конец очереди. Выбор запоминается.
+   ===================================================================== */
+// адрес веб-приложения Google Apps Script (…/exec); для проверок можно подменить при сборке
+const RELAY_URL = process.env.REACT_APP_RELAY_URL || "";
+const HOSTS = { direct: SUPABASE_URL, dot: SUPABASE_URL + "." };
+const PATH_LABEL = { direct: "напрямую", dot: "напрямую", relay: "через Google" };
+const NET_KEY = "m5_net_v1";
+
+const net = (() => {
+  const d = { ok: true, last: "direct", badUntil: { direct: 0, dot: 0, relay: 0 }, fails: { direct: 0, dot: 0, relay: 0 } };
+  try {
+    const s = JSON.parse(lsGet(NET_KEY) || "null");
+    if (s && s.badUntil) { d.badUntil = { ...d.badUntil, ...s.badUntil }; d.fails = { ...d.fails, ...(s.fails || {}) }; d.last = s.last || "direct"; }
+  } catch {}
+  if (!RELAY_URL && d.last === "relay") d.last = "direct";
+  return d;
+})();
 const netListeners = new Set();
-let netOk = true;
-function setNet(ok) { if (ok !== netOk) { netOk = ok; netListeners.forEach(f => f(ok)); } }
+let netSnap = { ok: net.ok, path: net.last };
+function netUpdate() {
+  lsSet(NET_KEY, JSON.stringify({ last: net.last, badUntil: net.badUntil, fails: net.fails }));
+  if (netSnap.ok !== net.ok || netSnap.path !== net.last) {
+    netSnap = { ok: net.ok, path: net.last };
+    netListeners.forEach(f => f(netSnap));
+  }
+}
 function useNet() {
-  const [ok, setOk] = useState(netOk);
-  useEffect(() => { netListeners.add(setOk); return () => { netListeners.delete(setOk); }; }, []);
-  return ok;
+  const [st, setSt] = useState(netSnap);
+  useEffect(() => { netListeners.add(setSt); return () => { netListeners.delete(setSt); }; }, []);
+  return st;
+}
+function markOk(p) { net.fails[p] = 0; net.badUntil[p] = 0; net.ok = true; net.last = p; netUpdate(); }
+function markBad(p, slowMs) {
+  let ms = slowMs;
+  if (!ms) {
+    net.fails[p] = (net.fails[p] || 0) + 1;
+    ms = Math.min(20 * 60000 * Math.pow(2, net.fails[p] - 1), 2 * 3600000); // 20 мин, 40 мин … до 2 ч
+    if (p === "relay") ms = Math.min(ms, 2 * 60000);
+  }
+  net.badUntil[p] = Math.max(net.badUntil[p] || 0, Date.now() + ms);
+  netUpdate();
+}
+function pathOrder() {
+  const now = Date.now();
+  const all = RELAY_URL ? ["direct", "relay", "dot"] : ["direct", "dot"];
+  const good = all.filter(p => !(net.badUntil[p] > now));
+  const bad = all.filter(p => net.badUntil[p] > now).sort((a, b) => net.badUntil[a] - net.badUntil[b]);
+  return good.concat(bad);
+}
+
+function netError(msg) { const e = new Error(msg); e.network = true; return e; }
+function parseResult(status, text) {
+  if (status >= 200 && status < 300) {
+    if (!text) return null;
+    try { return JSON.parse(text); } catch { return null; }
+  }
+  const e = new Error(`Ошибка сервера ${status}${text ? ": " + String(text).slice(0, 200) : ""}`);
+  e.status = status;
+  if (status >= 500 || status === 408 || status === 429) e.network = true; // временная беда — пробуем другой путь / позже
+  else e.http = true; // сервер ответил отказом — повтор не поможет
+  throw e;
+}
+
+// одна попытка по одному пути
+async function attempt(p, method, path, body, prefer, outer) {
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  outer.addEventListener("abort", stop);
+  const timer = setTimeout(stop, p === "relay" ? 20000 : 15000);
+  try {
+    if (p === "relay") {
+      let res, txt;
+      try {
+        // text/plain без своих заголовков — «простой» запрос, Google отвечает без предзапроса CORS
+        res = await fetch(RELAY_URL, {
+          method: "POST", cache: "no-store", redirect: "follow", signal: ctrl.signal,
+          body: JSON.stringify({ m: method, p: path, b: body === undefined ? null : JSON.stringify(body), pr: prefer || "" }),
+        });
+        txt = await res.text();
+      } catch (e) {
+        throw netError(e && e.name === "AbortError" ? "Запасной канал (Google) долго не отвечает." : "Нет связи с запасным каналом (Google).");
+      }
+      let j = null;
+      try { j = JSON.parse(txt); } catch {}
+      if (!j || typeof j !== "object") throw netError(`Запасной канал ответил с ошибкой (${res.status}).`);
+      if (j.error || !j.s) throw netError("Запасной канал: " + (j.error || "база не ответила"));
+      return parseResult(j.s, j.t || "");
+    }
+    let useAuth = true;
+    for (;;) {
+      const headers = { "Content-Type": "application/json", apikey: SUPABASE_KEY };
+      if (useAuth) headers.Authorization = `Bearer ${SUPABASE_KEY}`;
+      if (prefer) headers.Prefer = prefer;
+      let res, text;
+      try {
+        res = await fetch(`${HOSTS[p]}/rest/v1/${path}`, {
+          method, headers, cache: "no-store", signal: ctrl.signal,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        text = await res.text();
+      } catch (e) {
+        throw netError(e && e.name === "AbortError" ? "Сервер долго не отвечает." : "Нет связи с сервером.");
+      }
+      if ((res.status === 401 || res.status === 403) && useAuth) { useAuth = false; continue; } // ещё раз — только с apikey
+      return parseResult(res.status, text);
+    }
+  } finally {
+    clearTimeout(timer);
+    outer.removeEventListener("abort", stop);
+  }
+}
+
+// запрос к базе: лучший путь, через 3 с без ответа — параллельно следующий
+function request(method, path, body, prefer) {
+  const order = pathOrder();
+  const hedgeMs = method === "GET" ? 3500 : 3000;
+  return new Promise((resolve, reject) => {
+    const outer = new AbortController();
+    const live = [];
+    let next = 0, failed = 0, settled = false, timer = null, lastErr = null;
+    const finish = () => { settled = true; clearTimeout(timer); outer.abort(); };
+    const arm = () => {
+      clearTimeout(timer);
+      if (next < order.length) timer = setTimeout(() => { launch(); arm(); }, hedgeMs);
+    };
+    const launch = () => {
+      if (settled || next >= order.length) return;
+      const rec = { p: order[next++], at: Date.now(), done: false };
+      live.push(rec);
+      attempt(rec.p, method, path, body, prefer, outer.signal).then(data => {
+        rec.done = true;
+        if (settled) return;
+        // пути, запущенные раньше и так и не ответившие, — медленные: 5 минут не ставим их первыми
+        live.forEach(o => { if (o !== rec && !o.done && o.at < rec.at) markBad(o.p, 5 * 60000); });
+        markOk(rec.p);
+        finish();
+        resolve(data);
+      }, err => {
+        rec.done = true;
+        if (settled) return;
+        if (err && err.http) { finish(); reject(err); return; }
+        markBad(rec.p);
+        lastErr = err; failed++;
+        if (next < order.length) { launch(); arm(); }
+        else if (failed >= next) {
+          finish();
+          net.ok = false; netUpdate();
+          const e = netError("Нет связи с базой — проверьте интернет.");
+          e.detail = lastErr && lastErr.message;
+          reject(e);
+        }
+      });
+    };
+    launch(); arm();
+  });
+}
+
+/* ---------------- очередь записей (ничего не теряется без связи) ----------------
+   Каждая запись сначала кладётся в память устройства (localStorage), потом отправляется.
+   Нет связи — запись ждёт и уходит сама, как только связь появится (даже после перезапуска).
+   Пока запись не дошла, она показывается в приложении с пометкой «⏳ не отправлено». */
+const OUTBOX_KEY = "m5_outbox_v1";
+let outboxMem = [], outboxLsBroken = false; // если память браузера недоступна — держим очередь в памяти страницы
+function loadOutbox() {
+  if (outboxLsBroken) return outboxMem;
+  let raw;
+  try { raw = window.localStorage.getItem(OUTBOX_KEY); } catch { outboxLsBroken = true; return outboxMem; }
+  if (!raw) return [];
+  try { const v = JSON.parse(raw); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+const outboxListeners = new Set();
+const syncListeners = new Set();
+function storeOutbox(list) {
+  outboxMem = list;
+  if (!outboxLsBroken) {
+    try {
+      if (list.length) window.localStorage.setItem(OUTBOX_KEY, JSON.stringify(list));
+      else window.localStorage.removeItem(OUTBOX_KEY);
+    } catch { outboxLsBroken = true; }
+  }
+  outboxListeners.forEach(f => f());
+}
+const pendingOps = () => loadOutbox().filter(o => !o.dead);
+function storageWorks() {
+  if (outboxLsBroken) return false;
+  try { window.localStorage.setItem("m5_t", "1"); window.localStorage.removeItem("m5_t"); return true; }
+  catch { outboxMem = loadOutbox(); outboxLsBroken = true; return false; }
+}
+function useOutbox() {
+  const [, setN] = useState(0);
+  useEffect(() => {
+    const f = () => setN(n => n + 1);
+    outboxListeners.add(f);
+    const onStorage = e => { if (e.key === OUTBOX_KEY) { f(); kickFlush(); } };
+    window.addEventListener("storage", onStorage);
+    return () => { outboxListeners.delete(f); window.removeEventListener("storage", onStorage); };
+  }, []);
+  const list = loadOutbox();
+  return { pending: list.filter(o => !o.dead), dead: list.filter(o => o.dead) };
+}
+function dropDead() { storeOutbox(loadOutbox().filter(o => !o.dead)); }
+
+// ожидающие подтверждения формы: id строки → [{ at, resolve, reject }]
+const waiters = new Map();
+function settleWaiters(id, at, err) {
+  const list = waiters.get(id);
+  if (!list) return;
+  const rest = [];
+  list.forEach(w => { if (w.at <= at) (err ? w.reject(err) : w.resolve({ queued: false })); else rest.push(w); });
+  if (rest.length) waiters.set(id, rest); else waiters.delete(id);
+}
+
+let flushing = false, flushTimer = null, flushDelay = 4000;
+function kickFlush(delay) {
+  clearTimeout(flushTimer);
+  flushTimer = setTimeout(flush, delay || 0);
+}
+async function flush() {
+  if (flushing || isDemo()) return;
+  flushing = true;
+  clearTimeout(flushTimer);
+  try {
+    for (;;) {
+      const op = pendingOps()[0];
+      if (!op) { flushDelay = 4000; break; }
+      try {
+        if (op.t === "put") {
+          await request("POST", TABLE, [{ id: op.id, data: op.data, updated_at: op.at }], "resolution=merge-duplicates,return=minimal");
+        } else {
+          await request("DELETE", `${TABLE}?id=eq.${encodeURIComponent(op.id)}`, undefined, "return=minimal");
+        }
+        storeOutbox(loadOutbox().filter(o => o.uid !== op.uid));
+        settleWaiters(op.id, op.at, null);
+        syncListeners.forEach(f => f());
+        flushDelay = 4000;
+      } catch (e) {
+        if (e && e.http) { // база отказала — повтор не поможет, показываем ошибку
+          storeOutbox(loadOutbox().map(o => (o.uid === op.uid ? { ...o, dead: true, err: e.message } : o)));
+          settleWaiters(op.id, op.at, e);
+          continue;
+        }
+        kickFlush(flushDelay);
+        flushDelay = Math.min(flushDelay * 2, 60000);
+        break;
+      }
+    }
+  } finally {
+    flushing = false;
+  }
+}
+
+// запись строки: в очередь → отправка; форма ждёт подтверждения до ~12 с,
+// потом говорит «сохранено на устройстве», а отправка продолжается сама
+function queueWrite(op) {
+  const at = new Date().toISOString();
+  const full = { ...op, at, uid: newId() };
+  const offline = !net.ok;
+  const noStorageErr = () => netError("Нет связи с базой, а память браузера недоступна. Проверьте интернет и нажмите ещё раз.");
+  return new Promise((resolve, reject) => {
+    if (offline && !storageWorks()) { reject(noStorageErr()); return; }
+    const w = { at, resolve, reject };
+    waiters.set(op.id, [...(waiters.get(op.id) || []), w]);
+    setTimeout(() => {
+      const list = waiters.get(op.id);
+      if (!list || !list.includes(w)) return; // уже подтверждено или отклонено
+      const rest = list.filter(x => x !== w);
+      if (rest.length) waiters.set(op.id, rest); else waiters.delete(op.id);
+      if (storageWorks()) { resolve({ queued: true }); return; }
+      // хранить негде — снимаем запись с очереди и честно говорим, что не сохранено
+      storeOutbox(loadOutbox().filter(o => o.uid !== full.uid));
+      reject(noStorageErr());
+    }, offline ? 2500 : 12000);
+    // новое состояние строки заменяет ещё не отправленное старое
+    storeOutbox(loadOutbox().filter(o => o.id !== op.id || o.dead).concat(full));
+    kickFlush();
+  });
+}
+
+// к ответу базы добавляем то, что ещё лежит в очереди этого устройства
+function withPending(rows, match) {
+  const list = pendingOps();
+  if (!list.length) return rows;
+  const map = new Map(rows.map(r => [r.id, r]));
+  list.forEach(op => {
+    if (op.t === "del") map.delete(op.id);
+    else if (match(op.id, op.data)) map.set(op.id, { id: op.id, data: { ...op.data, _pending: true } });
+    else map.delete(op.id); // строка «переехала» (например, сменили дату)
+  });
+  return Array.from(map.values());
+}
+
+/* ---------------- обновление приложения ---------------- */
+const PUB = process.env.PUBLIC_URL || "";
+let openForms = 0;
+function useFormOpen() { useEffect(() => { openForms++; return () => { openForms--; }; }, []); }
+function loadedBundle() {
+  const src = Array.from(document.scripts).map(s => s.src || "").find(u => /\/static\/js\/main\.\w+\.js/.test(u));
+  const m = src && src.match(/\/static\/js\/main\.(\w+)\.js/);
+  return m ? m[1] : null;
+}
+async function findUpdate() {
+  const cur = loadedBundle();
+  if (!cur || isDemo()) return null;
+  try {
+    const r = await fetch(`${PUB}/index.html?check=${Date.now()}`, { cache: "no-store" });
+    if (!r.ok) return null;
+    const m = (await r.text()).match(/\/static\/js\/main\.(\w+)\.js/);
+    return m && m[1] !== cur ? m[1] : null;
+  } catch { return null; }
+}
+function safeToReload() {
+  const a = document.activeElement;
+  const typing = a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName);
+  return openForms === 0 && !typing && (pendingOps().length === 0 || storageWorks());
+}
+const reloadTo = h => window.location.replace(`${PUB}/?v=${h}`);
+function useUpdater() {
+  const [ready, setReady] = useState(null);
+  useEffect(() => {
+    let stop = false, last = 0;
+    const check = async () => {
+      if (Date.now() - last < 90000) return;
+      last = Date.now();
+      const h = await findUpdate();
+      if (stop || !h) return;
+      setReady(h);
+      if (safeToReload()) reloadTo(h);
+    };
+    const t1 = setTimeout(check, 20000);
+    const t2 = setInterval(check, 10 * 60000);
+    const onVis = () => { if (document.visibilityState === "visible") check(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { stop = true; clearTimeout(t1); clearInterval(t2); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+  useEffect(() => {
+    if (!ready) return undefined;
+    const t = setInterval(() => { if (safeToReload()) reloadTo(ready); }, 15000);
+    return () => clearInterval(t);
+  }, [ready]);
+  return ready;
 }
 
 /* ---------------- работа с базой ---------------- */
 function isDemo() { try { return typeof window !== "undefined" && window.__M5_DEMO__ === true; } catch { return false; } }
-
-// Запрос к Supabase с таймаутом и автоповтором (до 4 попыток).
-// Все записи идемпотентны (запись по id), поэтому повтор безопасен.
-// В России соединения с Cloudflare (через него работает база) иногда «замерзают»:
-// тогда повторяем запрос через адрес с точкой на конце — для браузера это другой
-// сервер, и он открывает НОВОЕ соединение. Рабочий адрес запоминаем.
-const SB_HOSTS = [SUPABASE_URL, SUPABASE_URL + "."];
-const ATTEMPT_TIMEOUTS = [10000, 15000, 20000, 25000];
-let sbHostIdx = 0;
-async function sbFetch(path, opts = {}) {
-  const { method = "GET", body, prefer } = opts;
-  let useAuth = true;
-  let lastErr = null;
-  for (let attempt = 0; attempt < ATTEMPT_TIMEOUTS.length; attempt++) {
-    if (attempt > 0) await sleep(600 * attempt);
-    const hostIdx = (sbHostIdx + attempt) % SB_HOSTS.length;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), ATTEMPT_TIMEOUTS[attempt]);
-    const headers = { "Content-Type": "application/json", apikey: SUPABASE_KEY };
-    if (useAuth) headers.Authorization = `Bearer ${SUPABASE_KEY}`;
-    if (prefer) headers.Prefer = prefer;
-    let res;
-    try {
-      res = await fetch(`${SB_HOSTS[hostIdx]}/rest/v1/${path}`, {
-        method, headers, cache: "no-store", signal: ctrl.signal,
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
-    } catch (e) {
-      clearTimeout(timer);
-      lastErr = new Error(e && e.name === "AbortError"
-        ? "Сервер долго не отвечает. Проверьте интернет и нажмите ещё раз."
-        : "Нет связи с сервером. Проверьте интернет и нажмите ещё раз.");
-      lastErr.network = true;
-      continue;
-    }
-    clearTimeout(timer);
-    const text = await res.text().catch(() => "");
-    if (res.ok) {
-      setNet(true);
-      sbHostIdx = hostIdx; // этот адрес отвечает — дальше работаем через него
-      if (!text) return null;
-      try { return JSON.parse(text); } catch { return null; }
-    }
-    if ((res.status === 401 || res.status === 403) && useAuth) {
-      useAuth = false; // вторая попытка — только с apikey
-      lastErr = new Error(`Доступ отклонён сервером (${res.status}). ${text.slice(0, 200)}`);
-      continue;
-    }
-    lastErr = new Error(`Ошибка сервера ${res.status}${text ? ": " + text.slice(0, 200) : ""}`);
-    if (res.status < 500 && res.status !== 408 && res.status !== 429) break;
-  }
-  if (lastErr && lastErr.network) setNet(false);
-  throw lastErr || new Error("Неизвестная ошибка");
-}
 
 /* --- демо-режим (только для предпросмотра, база не затрагивается) --- */
 const DEMO_KEY = "m5_demo_rows_v4";
@@ -183,6 +471,46 @@ function demoDb() {
 }
 const demoSave = () => lsSet(DEMO_KEY, JSON.stringify(demoRows));
 
+/* ---------------- копия данных на устройстве ----------------
+   Последний ответ базы по каждому запросу хранится в памяти браузера.
+   План показывается сразу (без ожидания) и остаётся виден, даже если связи нет. */
+const CACHE_KEY = "m5_cache_v1";
+let cacheMem = null;
+function cacheAll() {
+  if (cacheMem) return cacheMem;
+  try { cacheMem = JSON.parse(lsGet(CACHE_KEY) || "{}") || {}; } catch { cacheMem = {}; }
+  return cacheMem;
+}
+function cachePut(q, rows) {
+  const all = cacheAll();
+  all[q] = { rows, at: Date.now() };
+  const keys = Object.keys(all);
+  if (keys.length > 40) keys.sort((a, b) => all[a].at - all[b].at).slice(0, keys.length - 40).forEach(k => { delete all[k]; });
+  lsSet(CACHE_KEY, JSON.stringify(all));
+}
+const cacheGet = q => cacheAll()[q] || null;
+const fmtClock = ms => { const d = new Date(ms); return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} в ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+const qWhere = (field, value) => `${TABLE}?select=id,data&data-%3E%3E${field}=eq.${encodeURIComponent(value)}`; // «->>» кодируем сами — так адрес одинаково понимают и браузер, и Google
+const matchWhere = (field, value) => (id, d) => (id.startsWith("req_") || id.startsWith("rep_")) && !!d && String(d[field]) === String(value);
+const Q_CFG = `${TABLE}?select=id,data&id=in.(cfg_machines,cfg_blocked)`;
+const matchCfg = id => id === "cfg_machines" || id === "cfg_blocked";
+
+// запрос с копией: при ошибке к ней прикладываем сохранённые данные (e.cached) и время (e.cachedAt)
+async function cachedGet(q, match) {
+  try {
+    const rows = await request("GET", q);
+    const list = Array.isArray(rows) ? rows : [];
+    cachePut(q, list);
+    return withPending(list, match);
+  } catch (e) {
+    const c = cacheGet(q);
+    if (c) { e.cached = withPending(c.rows, match); e.cachedAt = c.at; }
+    else if (pendingOps().length) e.cached = withPending([], match);
+    throw e;
+  }
+}
+
 const api = {
   async rowsWhere(field, value) {
     if (isDemo()) {
@@ -191,39 +519,50 @@ const api = {
         .filter(([id, d]) => d && d[field] === value && (id.startsWith("req_") || id.startsWith("rep_")))
         .map(([id, data]) => ({ id, data: clone(data) }));
     }
-    const rows = await sbFetch(`${TABLE}?select=id,data&data->>${field}=eq.${encodeURIComponent(value)}`);
-    return Array.isArray(rows) ? rows : [];
+    return cachedGet(qWhere(field, value), matchWhere(field, value));
+  },
+  // то, что уже есть на устройстве (для мгновенного показа), или null
+  peekWhere(field, value) {
+    if (isDemo()) return null;
+    const c = cacheGet(qWhere(field, value));
+    return c ? { rows: withPending(c.rows, matchWhere(field, value)), at: c.at } : null;
   },
   byDate(date) { return api.rowsWhere("date", date); },
   byMonth(ym) { return api.rowsWhere("month", ym); },
+  // запись и удаление идут через очередь: { queued: true } — пока лежит на устройстве
   async put(id, data) {
-    if (isDemo()) { await sleep(300); demoDb()[id] = clone(data); demoSave(); return; }
-    await sbFetch(TABLE, {
-      method: "POST",
-      prefer: "resolution=merge-duplicates,return=minimal",
-      body: [{ id, data, updated_at: new Date().toISOString() }],
-    });
+    if (isDemo()) { await sleep(300); demoDb()[id] = clone(data); demoSave(); return { queued: false }; }
+    return queueWrite({ t: "put", id, data });
   },
   async del(id) {
-    if (isDemo()) { await sleep(200); delete demoDb()[id]; demoSave(); return; }
-    await sbFetch(`${TABLE}?id=eq.${encodeURIComponent(id)}`, { method: "DELETE", prefer: "return=minimal" });
+    if (isDemo()) { await sleep(200); delete demoDb()[id]; demoSave(); return { queued: false }; }
+    return queueWrite({ t: "del", id });
   },
-  async getCfg() {
+  async getCfg(allowCached) {
     let rows;
     if (isDemo()) {
       const db = demoDb();
       rows = ["cfg_machines", "cfg_blocked"].filter(k => db[k]).map(k => ({ id: k, data: clone(db[k]) }));
     } else {
-      rows = await sbFetch(`${TABLE}?select=id,data&id=in.(cfg_machines,cfg_blocked)`);
+      try { rows = await cachedGet(Q_CFG, matchCfg); }
+      catch (e) { if (allowCached && e.cached) rows = e.cached; else throw e; }
     }
-    const cfg = emptyCfg();
-    (rows || []).forEach(r => {
-      if (r.id === "cfg_machines" && r.data) cfg.machines = { repair: r.data.repair || {}, extra: r.data.extra || [], repairs: r.data.repairs || [] };
-      if (r.id === "cfg_blocked" && r.data) cfg.blocked = { ids: r.data.ids || [] };
-    });
-    return cfg;
+    return cfgFromRows(rows);
+  },
+  peekCfg() {
+    if (isDemo()) return null;
+    const c = cacheGet(Q_CFG);
+    return c ? cfgFromRows(withPending(c.rows, matchCfg)) : null;
   },
 };
+function cfgFromRows(rows) {
+  const cfg = emptyCfg();
+  (rows || []).forEach(r => {
+    if (r.id === "cfg_machines" && r.data) cfg.machines = { repair: r.data.repair || {}, extra: r.data.extra || [], repairs: r.data.repairs || [] };
+    if (r.id === "cfg_blocked" && r.data) cfg.blocked = { ids: r.data.ids || [] };
+  });
+  return cfg;
+}
 const emptyCfg = () => ({ machines: { repair: {}, extra: [], repairs: [] }, blocked: { ids: [] } });
 
 // Ремонт техники на конкретную дату (по истории ремонтов с датами)
@@ -261,6 +600,16 @@ function splitRows(rows) {
 
 // Загрузка заявок и отчётов за день или месяц + автообновление.
 // Формы хранят свои данные отдельно, поэтому обновление их не стирает.
+// что уже лежит на устройстве по этому запросу — чтобы показать план сразу
+function peekRows(kind, key) {
+  if (kind === "date") { const c = api.peekWhere("date", key); return c && c.rows; }
+  if (kind === "month") { const c = api.peekWhere("month", key); return c && c.rows; }
+  const [from, to] = key.split("|");
+  const parts = monthsInRange(from, to).map(m => api.peekWhere("month", m));
+  if (parts.some(p => !p)) return null;
+  return parts.flatMap(p => p.rows).filter(r => r.data && r.data.date >= from && r.data.date <= to);
+}
+
 function useRows(kind, key, pollMs) {
   const [state, setState] = useState({ reqs: [], reps: {}, loading: true, error: "", key: null });
   const seq = useRef(0);
@@ -273,25 +622,46 @@ function useRows(kind, key, pollMs) {
       else if (kind === "month") rows = await api.byMonth(key);
       else { // диапазон дат "с|по": грузим нужные месяцы и отбираем даты
         const [from, to] = key.split("|");
-        const parts = await Promise.all(monthsInRange(from, to).map(m => api.byMonth(m)));
-        rows = parts.flat().filter(r => r.data && r.data.date >= from && r.data.date <= to);
+        const parts = await Promise.allSettled(monthsInRange(from, to).map(m => api.byMonth(m)));
+        const inRange = list => list.filter(r => r.data && r.data.date >= from && r.data.date <= to);
+        const bad = parts.find(p => p.status === "rejected");
+        if (bad) {
+          const e = bad.reason || new Error("Нет связи с базой.");
+          const ok = parts.every(p => p.status === "fulfilled" || (p.reason && p.reason.cached));
+          if (ok) e.cached = inRange(parts.flatMap(p => (p.status === "fulfilled" ? p.value : p.reason.cached)));
+          throw e;
+        }
+        rows = inRange(parts.flatMap(p => p.value));
       }
       if (my !== seq.current) return; // пришёл устаревший ответ — игнорируем
       const { reqs, reps } = splitRows(rows);
       setState({ reqs, reps, loading: false, error: "", key });
     } catch (e) {
       if (my !== seq.current) return;
-      setState(s => ({ ...s, loading: false, error: e.message }));
+      const msg = (e && e.message) || "Нет связи с базой.";
+      if (e && e.cached) { // нет связи — показываем то, что сохранено на устройстве
+        const { reqs, reps } = splitRows(e.cached);
+        const when = e.cachedAt ? ` Показано то, что было загружено ${fmtClock(e.cachedAt)}.` : "";
+        setState({ reqs, reps, loading: false, error: msg + when, key });
+      } else setState(s => ({ ...s, loading: false, error: msg }));
     }
   }, [kind, key]);
   useEffect(() => {
-    setState({ reqs: [], reps: {}, loading: true, error: "", key: null });
-    load(false);
-    const t = setInterval(() => { if (document.visibilityState === "visible") load(true); }, pollMs || 20000);
+    const cached = peekRows(kind, key);
+    if (cached) { const { reqs, reps } = splitRows(cached); setState({ reqs, reps, loading: false, error: "", key }); load(true); }
+    else { setState({ reqs: [], reps: {}, loading: true, error: "", key: null }); load(false); }
+    let tick = 0;
+    const t = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (net.last === "relay" && tick++ % 2) return; // через Google опрашиваем вдвое реже
+      load(true);
+    }, pollMs || 20000);
     const onVis = () => { if (document.visibilityState === "visible") load(true); };
+    const onSync = () => load(true); // запись из очереди дошла до базы — перечитываем
     document.addEventListener("visibilitychange", onVis);
-    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); };
-  }, [load, pollMs]);
+    syncListeners.add(onSync);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", onVis); syncListeners.delete(onSync); };
+  }, [load, pollMs, kind, key]);
   // после сохранения: сразу показываем изменение и перечитываем базу
   const applyLocal = useCallback((fn) => {
     seq.current++;
@@ -302,21 +672,26 @@ function useRows(kind, key, pollMs) {
 }
 
 function useSaver() {
-  const [s, setS] = useState({ busy: false, error: "", ok: false });
+  const [s, setS] = useState({ busy: false, error: "", ok: false, queued: false });
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  const set = v => { if (alive.current) setS(v); };
   const run = async (fn) => {
-    setS({ busy: true, error: "", ok: false });
+    set({ busy: true, error: "", ok: false, queued: false });
     try {
-      await fn();
-      setS({ busy: false, error: "", ok: true });
-      setTimeout(() => setS(x => (x.busy ? x : { ...x, ok: false })), 2500);
+      const r = await fn();
+      const queued = !!(r && r.queued);
+      set({ busy: false, error: "", ok: true, queued });
+      setTimeout(() => set(x => (x.busy ? x : { ...x, ok: false, queued: false })), queued ? 9000 : 2500);
       return true;
     } catch (e) {
-      setS({ busy: false, error: (e && e.message) || String(e), ok: false });
+      set({ busy: false, error: (e && e.message) || String(e), ok: false, queued: false });
       return false;
     }
   };
   return [s, run];
 }
+const anyQueued = (...rs) => ({ queued: rs.some(r => r && r.queued) });
 
 /* ---------------- голосовой ввод (Chrome, Android, iPhone Safari) ---------------- */
 const SpeechRec = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition || null) : null;
@@ -416,6 +791,7 @@ function Field({ label, children }) {
 
 function SaveNote({ s }) {
   if (s.error) return <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: C.redBg, color: C.red, fontSize: 13 }}>❌ Не сохранено. {s.error}</div>;
+  if (s.queued) return <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: C.orangeBg, color: "#8a4b00", fontSize: 13 }}>📥 Связь с базой плохая — сохранено на этом устройстве. Отправится в базу само, как только появится связь.</div>;
   if (s.ok) return <div style={{ marginTop: 8, color: C.green, fontSize: 13, fontWeight: 600 }}>✅ Сохранено</div>;
   return null;
 }
@@ -553,6 +929,7 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
   const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: presetMachineId || "", time: "08:00", place: "", org: "", note: "" });
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
+  useFormOpen();
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
   const busyMachine = f.machineId && (dayReqs || []).find(r => Number(r.machineId) === Number(f.machineId) && r.id !== f.id && r.date === f.date);
   const busyDriver = f.driverId && (dayReqs || []).find(r => Number(r.driverId) === Number(f.driverId) && r.id !== f.id && r.date === f.date);
@@ -619,6 +996,7 @@ function ReportForm({ req, rep, onSubmit, onCancel }) {
   }));
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
+  useFormOpen();
   const set = (k, v) => setF(x => ({ ...x, [k]: v }));
   const hours = calcHours(f.from, f.to);
 
@@ -679,11 +1057,12 @@ function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPl
         <div style={{ ...S.h2, fontSize: 15 }}>✏️ Изменить заявку</div>
         <ReqForm initial={req} date={req.date} drivers={drivers} machines={machines} repairOf={repairOf} dayReqs={dayReqs}
           submitLabel="💾 Сохранить изменения"
-          onSubmit={async (f) => { await onSaveReq(f); setMode("view"); }}
+          onSubmit={async (f) => { const r = await onSaveReq(f); setMode("view"); return r; }}
           onCancel={() => setMode("view")} />
       </div>
     );
   }
+  const pending = !!(req._pending || (rep && rep._pending));
 
   return (
     <div style={cardStyle} data-testid="req-card">
@@ -725,9 +1104,15 @@ function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPl
         </div>
       )}
 
+      {pending && (
+        <div data-testid="pending" style={{ marginTop: 8, padding: "6px 10px", borderRadius: 8, background: C.orangeBg, color: "#8a4b00", fontSize: 12.5 }}>
+          ⏳ Ещё не дошло до базы — сохранено на этом устройстве и отправится само
+        </div>
+      )}
+
       {mode === "report" && (
         <ReportForm req={req} rep={rep}
-          onSubmit={async (f) => { await onSaveRep(req, f); setMode("view"); }}
+          onSubmit={async (f) => { const r = await onSaveRep(req, f); setMode("view"); return r; }}
           onCancel={() => setMode("view")} />
       )}
 
@@ -783,24 +1168,28 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
       updatedBy: me.id, updatedAt: new Date().toISOString(),
       driverName: userName(f.driverId), createdByName: old ? (old.createdByName || userName(old.createdBy)) : me.name, updatedByName: me.name,
     };
-    await api.put(id, data);
+    const r1 = await api.put(id, data);
     // если у заявки уже есть отчёт и поменяли дату/водителя — переносим отчёт вместе с ней
     const rep = day.reps[id];
+    let r2 = null;
     if (!isNew && rep && (rep.date !== data.date || Number(rep.driverId) !== Number(data.driverId))) {
-      const { id: repId, ...repData } = rep;
-      await api.put(repId, { ...repData, date: data.date, month: data.month, driverId: data.driverId, machineId: data.machineId });
+      const { id: repId, _pending, ...repData } = rep;
+      r2 = await api.put(repId, { ...repData, date: data.date, month: data.month, driverId: data.driverId, machineId: data.machineId });
     }
+    const res = anyQueued(r1, r2);
     day.applyLocal(st => {
       st.reqs = st.reqs.filter(r => r.id !== id);
-      if (data.date === date) st.reqs.push({ ...data, id });
+      if (data.date === date) st.reqs.push({ ...data, id, _pending: res.queued });
     });
     if (isNew && data.date !== date) setDate(data.date); // показываем день, на который записали заявку
+    return res;
   };
 
   const deleteReq = async (req) => {
-    if (day.reps[req.id]) await api.del("rep_" + req.id);
-    await api.del(req.id);
+    const r1 = day.reps[req.id] ? await api.del("rep_" + req.id) : null;
+    const r2 = await api.del(req.id);
     day.applyLocal(st => { st.reqs = st.reqs.filter(r => r.id !== req.id); delete st.reps[req.id]; });
+    return anyQueued(r1, r2);
   };
 
   const saveRep = async (req, f) => {
@@ -811,13 +1200,15 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
       done: true, savedBy: me.id, savedAt: new Date().toISOString(),
       driverName: userName(req.driverId), savedByName: me.name,
     };
-    await api.put(id, data);
-    day.applyLocal(st => { st.reps[req.id] = { ...data, id }; });
+    const r = await api.put(id, data);
+    day.applyLocal(st => { st.reps[req.id] = { ...data, id, _pending: !!(r && r.queued) }; });
+    return r;
   };
 
   const deleteRep = async (req) => {
-    await api.del("rep_" + req.id);
+    const r = await api.del("rep_" + req.id);
     day.applyLocal(st => { delete st.reps[req.id]; });
+    return r;
   };
 
   const doneCnt = list.filter(r => day.reps[r.id]?.done).length;
@@ -1098,29 +1489,32 @@ function MachinesView({ me, machines, cfg, saveCfg, repairOf, onPlan }) {
   const statusOf = (mid, d) => (repairOf(mid, d) ? "repair" : reqsOn(mid, d).length ? "busy" : "free");
 
   const startRepair = (mid, from, note) => run(async () => {
-    await saveCfg("machines", c => {
+    const r = await saveCfg("machines", c => {
       c.repairs = [...(c.repairs || []), { id: newId(), machineId: Number(mid), from, to: null, note, by: me.id, at: new Date().toISOString() }];
       if (c.repair) delete c.repair[mid];
     });
     setFormFor(null); setNewRep({ machineId: "" });
+    return r;
   });
   const endRepair = (mid, rp, backDate) => run(async () => {
-    await saveCfg("machines", c => {
+    const r = await saveCfg("machines", c => {
       if (c.repair) delete c.repair[mid];
       if (rp && !rp.legacy) {
         const last = addDays(backDate, -1);
-        c.repairs = (c.repairs || []).map(r => (r.id === rp.id ? { ...r, to: last < r.from ? r.from : last, closedBy: me.id } : r));
+        c.repairs = (c.repairs || []).map(x => (x.id === rp.id ? { ...x, to: last < x.from ? x.from : last, closedBy: me.id } : x));
       }
     });
     setFormFor(null);
+    return r;
   });
-  const deleteRepair = (r) => run(async () => {
-    await saveCfg("machines", c => { c.repairs = (c.repairs || []).filter(x => x.id !== r.id); });
+  const deleteRepair = (rp) => run(async () => {
+    const r = await saveCfg("machines", c => { c.repairs = (c.repairs || []).filter(x => x.id !== rp.id); });
     setConfirmDel(null);
+    return r;
   });
   const addMachine = () => {
     const n = name.trim(); if (!n) return;
-    run(async () => { await saveCfg("machines", c => { c.extra = [...(c.extra || []), { id: 1000 + Date.now() % 1000000, name: n }]; }); setName(""); });
+    run(async () => { const r = await saveCfg("machines", c => { c.extra = [...(c.extra || []), { id: 1000 + Date.now() % 1000000, name: n }]; }); setName(""); return r; });
   };
   const removeMachine = (m) => run(() => saveCfg("machines", c => { c.extra = (c.extra || []).filter(x => x.id !== m.id); }));
 
@@ -1435,7 +1829,42 @@ function Login({ blockedIds, onLogin }) {
           {err && <div style={{ color: C.red, fontSize: 14, textAlign: "center" }}>{err}</div>}
           <button style={S.btn(C.blue, { width: "100%", fontSize: 16, padding: 13 })} onClick={submit}>Войти</button>
         </div>
+        <div style={{ textAlign: "center", color: C.gray, fontSize: 11.5, marginTop: 16 }}>версия {BUILD}</div>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- полоски: очередь отправки и новая версия ---------------- */
+function OutboxBar() {
+  const ob = useOutbox();
+  const [busy, setBusy] = useState(false);
+  const [, setTick] = useState(0);
+  const has = ob.pending.length > 0;
+  useEffect(() => {
+    if (!has) return undefined;
+    const t = setInterval(() => setTick(n => n + 1), 2000);
+    return () => clearInterval(t);
+  }, [has]);
+  // свежие записи (меньше 8 секунд) ещё отправляются обычным порядком — полоску не показываем
+  const pending = ob.pending.filter(o => Date.now() - Date.parse(o.at) > 8000);
+  const dead = ob.dead;
+  if (!pending.length && !dead.length) return null;
+  const sendNow = async () => { setBusy(true); flushDelay = 4000; await flush(); setBusy(false); };
+  return (
+    <div style={{ maxWidth: 780, margin: "0 auto", padding: "10px 12px 0" }}>
+      {pending.length > 0 && (
+        <div data-testid="outbox" style={{ ...S.card, background: C.orangeBg, color: "#8a4b00", fontSize: 13.5, marginBottom: 0, padding: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: "1 1 230px" }}>⏳ Не отправлено в базу: <b>{pending.length}</b>. Сохранено на этом устройстве — отправится само, как только появится связь.</span>
+          <button style={S.ghost()} disabled={busy} onClick={sendNow}>{busy ? "⏳ Отправляем…" : "Отправить сейчас"}</button>
+        </div>
+      )}
+      {dead.length > 0 && (
+        <div style={{ ...S.card, background: C.redBg, color: C.red, fontSize: 13.5, marginBottom: 0, marginTop: 6, padding: 10 }}>
+          ❌ База не приняла записей: {dead.length}. {dead[0].err}
+          <button style={S.ghost({ marginLeft: 8 })} onClick={dropDead}>Скрыть</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1443,19 +1872,36 @@ function Login({ blockedIds, onLogin }) {
 /* ---------------- приложение ---------------- */
 export default function App() {
   const [me, setMe] = useState(() => { const id = Number(lsGet("m5_user")); return USERS.find(u => u.id === id) || null; });
-  const [cfg, setCfg] = useState(emptyCfg);
+  const [cfg, setCfg] = useState(() => api.peekCfg() || emptyCfg());
   const [tab, setTab] = useState("plan");
   const [planPreset, setPlanPreset] = useState(null);
-  const online = useNet();
+  const netSt = useNet();
+  const update = useUpdater();
 
   const loadCfg = useCallback(async () => {
-    try { setCfg(await api.getCfg()); } catch {}
+    try { setCfg(await api.getCfg(true)); } catch {}
   }, []);
   useEffect(() => {
     loadCfg();
-    const t = setInterval(() => { if (document.visibilityState === "visible") loadCfg(); }, 60000);
-    return () => clearInterval(t);
+    let tick = 0;
+    const t = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (net.last === "relay" && tick++ % 2) return;
+      loadCfg();
+    }, 60000);
+    syncListeners.add(loadCfg);
+    return () => { clearInterval(t); syncListeners.delete(loadCfg); };
   }, [loadCfg]);
+
+  // очередь записей: отправляем при запуске, при появлении сети и при возврате в приложение
+  useEffect(() => {
+    kickFlush(300);
+    const onOnline = () => kickFlush(500);
+    const onVis = () => { if (document.visibilityState === "visible") kickFlush(300); };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("online", onOnline); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
 
   // если сотрудника заблокировали — выходим
   useEffect(() => {
@@ -1467,8 +1913,9 @@ export default function App() {
     const fresh = await api.getCfg();
     const piece = clone(fresh[part]);
     mutate(piece);
-    await api.put(part === "machines" ? "cfg_machines" : "cfg_blocked", piece);
+    const r = await api.put(part === "machines" ? "cfg_machines" : "cfg_blocked", piece);
     setCfg({ ...fresh, [part]: piece });
+    return r;
   };
 
   const login = u => { setMe(u); lsSet("m5_user", String(u.id)); setTab("plan"); };
@@ -1495,7 +1942,8 @@ export default function App() {
             <div style={{ fontSize: 13, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{me.name} · {ROLE_LABEL[me.role]}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span title={online ? "Связь с сервером есть" : "Нет связи с сервером"} style={{ fontSize: 12, opacity: 0.95 }}>{online ? "🟢" : "🔴 нет связи"}</span>
+            <span title={!netSt.ok ? "Нет связи с базой" : netSt.path === "relay" ? "База отвечает через запасной канал Google" : "Связь с базой есть"}
+              style={{ fontSize: 12, opacity: 0.95, whiteSpace: "nowrap" }}>{!netSt.ok ? "🔴 нет связи" : netSt.path === "relay" ? "🟡 через Google" : "🟢"}</span>
             <button onClick={logout} style={{ background: "rgba(255,255,255,0.18)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 12px", cursor: "pointer", fontWeight: 600, fontFamily: "inherit" }}>Выйти</button>
           </div>
         </div>
@@ -1504,6 +1952,12 @@ export default function App() {
       {isDemo() && (
         <div style={{ background: "#fff8e1", color: "#8a6d00", fontSize: 13, padding: "8px 16px", textAlign: "center" }}>
           Демо-режим предпросмотра: данные примерные и сохраняются только в этом окне. Настоящая база не затрагивается.
+        </div>
+      )}
+      {update && (
+        <div style={{ background: C.blueBg, color: C.blue, fontSize: 13.5, padding: "8px 16px", textAlign: "center" }}>
+          🔄 Вышла новая версия приложения.
+          <button style={S.ghost({ marginLeft: 8, padding: "5px 10px" })} onClick={() => reloadTo(update)}>Обновить</button>
         </div>
       )}
 
@@ -1521,6 +1975,7 @@ export default function App() {
         </div>
       )}
 
+      <OutboxBar />
       <div style={S.wrap}>
         {isDriver && <div style={{ ...S.h2, marginTop: 6 }}>Мои заявки</div>}
         {(isDriver || tab === "plan") && (
@@ -1529,6 +1984,9 @@ export default function App() {
         {!isDriver && tab === "report" && <ReportView machines={machines} repairOf={repairOf} />}
         {!isDriver && tab === "machines" && <MachinesView me={me} machines={machines} cfg={cfg} saveCfg={saveCfg} repairOf={repairOf} onPlan={goPlan} />}
         {!isDriver && tab === "people" && me.role === "manager" && <PeopleView me={me} cfg={cfg} saveCfg={saveCfg} />}
+        <div style={{ textAlign: "center", color: C.gray, fontSize: 11.5, marginTop: 18 }}>
+          версия {BUILD} · связь с базой: {netSt.ok ? PATH_LABEL[netSt.path] : "нет"}
+        </div>
       </div>
     </div>
   );

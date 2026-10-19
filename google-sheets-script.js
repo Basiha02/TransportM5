@@ -1,5 +1,6 @@
 /* ================================================================
-   Транспорт М5 — выгрузка заявок и отчётов в эту Google Таблицу.
+   Транспорт М5 — выгрузка заявок и отчётов в эту Google Таблицу
+   и запасной канал связи приложения с базой (в конце файла).
    Каждый день в 21:00 (Челябинск) таблица сама берёт данные из базы.
    Меню «М5» в таблице: «Обновить сейчас» и «Включить ежедневное обновление».
    ================================================================ */
@@ -182,4 +183,44 @@ function writeSummary_(ss, name, keyTitle, reqs, reps, keyFn, monthName, today, 
 
 function getSheet_(ss, name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+
+/* ================================================================
+   ЗАПАСНОЙ КАНАЛ СВЯЗИ ПРИЛОЖЕНИЯ С БАЗОЙ (через Google)
+   Российские провайдеры режут Cloudflare, через который работает база Supabase,
+   а Google работает. Если база напрямую не отвечает, приложение само шлёт
+   запрос сюда, а скрипт передаёт его в базу со стороны Google.
+   Пускает только к таблице app_data, с тем же открытым ключом, что и приложение.
+   Публикуется один раз: «Начать развертывание» → «Новое развертывание» →
+   «Веб-приложение», запуск от имени «Я», доступ «Все».
+   ================================================================ */
+function doPost(e) {
+  var out;
+  try {
+    var q = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var m = String(q.m || 'GET').toUpperCase();
+    var p = String(q.p || '');
+    if (['GET', 'POST', 'PATCH', 'DELETE'].indexOf(m) < 0) throw new Error('метод не разрешён');
+    if (!/^app_data(\?|$)/.test(p)) throw new Error('адрес не разрешён');
+    p = p.replace(/>/g, '%3E').replace(/</g, '%3C').replace(/ /g, '%20').replace(/"/g, '%22');
+    var headers = { apikey: SUPABASE_KEY, Authorization: 'Bearer ' + SUPABASE_KEY };
+    if (q.pr) headers.Prefer = String(q.pr);
+    var opt = { method: m.toLowerCase(), headers: headers, muteHttpExceptions: true, followRedirects: false };
+    if (q.b !== null && q.b !== undefined && m !== 'GET' && m !== 'DELETE') {
+      opt.contentType = 'application/json; charset=utf-8';
+      opt.payload = String(q.b);
+    }
+    var r = UrlFetchApp.fetch(SUPABASE_URL + '/rest/v1/' + p, opt);
+    out = { s: r.getResponseCode(), t: r.getContentText() };
+  } catch (err) {
+    out = { s: 0, error: String((err && err.message) || err) };
+  }
+  return ContentService.createTextOutput(JSON.stringify(out)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// проверка, что канал опубликован: открыть адрес веб-приложения в браузере
+function doGet() {
+  return ContentService.createTextOutput(JSON.stringify({ ok: true, app: 'Транспорт М5', relay: true }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
