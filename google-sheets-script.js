@@ -104,7 +104,10 @@ function updateM5() {
 
   /* ---------- Лист «Заявки» ---------- */
   var head = ['Дата', 'Месяц', 'Водитель', 'Техника', 'Время подачи', 'Куда / объект', 'Заказчик', 'Заявку внёс',
-              'Статус', 'Работал с', 'до', 'Часы', 'Рейсы', 'Маршрут', 'Путевой закрыт', 'Комментарий водителя', 'Комментарий к заявке'];
+              'Статус', 'Работал с', 'до', 'Часы', 'Рейсы', 'Маршрут', 'Путевой закрыт', 'Комментарий водителя', 'Комментарий к заявке',
+              'Оплата', 'Тонн', 'Рейсы с тоннажем'];
+  var tripHead = ['Дата', 'Месяц', 'Водитель', 'Техника', 'Заказчик', 'Куда / объект', 'Оплата', 'Рейс №', 'Что вёз', 'Тонн', 'Маршрут', 'Путевой закрыт'];
+  var tripTable = [];
   var table = [], colors = [];
   reqs.forEach(function (q) {
     var p = reps[q.id];
@@ -115,8 +118,16 @@ function updateM5() {
       q.createdBy ? (Number(q.createdBy) === Number(q.driverId) ? 'сам водитель' : user(q.createdBy)) : '',
       status, done ? (p.from || '') : '', done ? (p.to || '') : '', done ? Number(p.hours || 0) : '',
       done ? Number(p.trips || 0) : '', done ? (p.route || '') : '', done ? (p.waybill ? 'да' : 'нет') : '',
-      done ? (p.comment || '') : '', q.note || ''
+      done ? (p.comment || '') : '', q.note || '',
+      payName_(done ? p : q), done && tons_(p) ? tons_(p) : '',
+      done ? (p.loads || []).map(function (l, i) { return (i + 1) + ') ' + (l.material || '—') + ' ' + num_(l.tons) + ' т'; }).join('; ') : ''
     ]);
+    if (done && (payKey_(p) !== 'hour' || Number(p.trips) > 0 || tons_(p) > 0)) {
+      var base = [q.date || '', monthName(q.month), user(q.driverId), machine(q.machineId), q.org || '', q.place || '', payName_(p)];
+      var tail = [p.route || '', p.waybill ? 'да' : 'нет'];
+      if ((p.loads || []).length) p.loads.forEach(function (l, i) { tripTable.push(base.concat([i + 1, l.material || '', num_(l.tons)], tail)); });
+      else tripTable.push(base.concat([Number(p.trips || 0) + ' рейс.', '', ''], tail));
+    }
     colors.push(done ? '#e6f6ec' : (status === 'Нет отчёта' ? '#fdecea' : '#ffffff'));
   });
   var sh = getSheet_(ss, 'Заявки');
@@ -135,13 +146,26 @@ function updateM5() {
   sh.getRange(1, 1, Math.max(table.length + 1, 2), head.length).createFilter();
   sh.autoResizeColumns(1, head.length);
 
+  /* ---------- Лист «Рейсы»: порейсовая оплата и тоннаж, по строке на рейс ---------- */
+  var tsh = getSheet_(ss, 'Рейсы');
+  tsh.clear();
+  tsh.getRange(1, 1, 1, tripHead.length).setValues([tripHead]).setFontWeight('bold').setBackground('#1e3a5f').setFontColor('#ffffff');
+  if (tripTable.length) {
+    tsh.getRange(2, 1, tripTable.length, tripHead.length).setValues(tripTable);
+    tsh.getRange(2, 1, tripTable.length, 1).setNumberFormat('dd.mm.yyyy');
+  }
+  tsh.setFrozenRows(1);
+  if (tsh.getFilter()) tsh.getFilter().remove();
+  tsh.getRange(1, 1, Math.max(tripTable.length + 1, 2), tripHead.length).createFilter();
+  tsh.autoResizeColumns(1, tripHead.length);
+
   /* ---------- Лист «Итоги по водителям» и «Итоги по технике» ---------- */
   writeSummary_(ss, 'Итоги по водителям', 'Водитель', reqs, reps, function (q) { return user(q.driverId); }, monthName, today, stamp);
   writeSummary_(ss, 'Итоги по технике', 'Техника', reqs, reps, function (q) { return machine(q.machineId); }, monthName, today, stamp);
 
   // убираем пустой стартовый лист
   ss.getSheets().forEach(function (s) {
-    if (['Заявки', 'Итоги по водителям', 'Итоги по технике'].indexOf(s.getName()) < 0 && s.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s);
+    if (['Заявки', 'Рейсы', 'Итоги по водителям', 'Итоги по технике'].indexOf(s.getName()) < 0 && s.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s);
   });
   ss.setActiveSheet(ss.getSheetByName('Итоги по водителям'));
   ss.moveActiveSheet(1);
@@ -151,19 +175,19 @@ function writeSummary_(ss, name, keyTitle, reqs, reps, keyFn, monthName, today, 
   var groups = {};
   reqs.forEach(function (q) {
     var k = (q.month || '') + '|' + keyFn(q);
-    var g = groups[k] || (groups[k] = { month: q.month || '', key: keyFn(q), shifts: 0, days: {}, hours: 0, trips: 0, missing: 0, noWaybill: 0, planned: 0 });
+    var g = groups[k] || (groups[k] = { month: q.month || '', key: keyFn(q), shifts: 0, days: {}, hours: 0, trips: 0, tons: 0, missing: 0, noWaybill: 0, planned: 0 });
     var p = reps[q.id];
     if (p && p.done) {
-      g.shifts++; g.days[q.date] = 1; g.hours += Number(p.hours || 0); g.trips += Number(p.trips || 0);
+      g.shifts++; g.days[q.date] = 1; g.hours += Number(p.hours || 0); g.trips += Number(p.trips || 0); g.tons += tons_(p);
       if (!p.waybill) g.noWaybill++;
     } else if (q.date < today) g.missing++;
     else g.planned++;
   });
   var list = Object.keys(groups).map(function (k) { return groups[k]; });
   list.sort(function (a, b) { return b.month.localeCompare(a.month) || b.hours - a.hours; });
-  var head = ['Месяц', keyTitle, 'Смен', 'Рабочих дней', 'Часов', 'Рейсов', 'Без отчёта', 'Путевой не закрыт', 'Ещё в плане'];
+  var head = ['Месяц', keyTitle, 'Смен', 'Рабочих дней', 'Часов', 'Рейсов', 'Без отчёта', 'Путевой не закрыт', 'Ещё в плане', 'Тонн'];
   var rows = list.map(function (g) {
-    return [monthName(g.month), g.key, g.shifts, Object.keys(g.days).length, Math.round(g.hours * 10) / 10, g.trips, g.missing, g.noWaybill, g.planned];
+    return [monthName(g.month), g.key, g.shifts, Object.keys(g.days).length, Math.round(g.hours * 10) / 10, g.trips, g.missing, g.noWaybill, g.planned, Math.round(g.tons * 100) / 100];
   });
   var sh = getSheet_(ss, name);
   sh.clear();
@@ -224,3 +248,9 @@ function doGet() {
   return ContentService.createTextOutput(JSON.stringify({ ok: true, app: 'Транспорт М5', relay: true }))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+/* ---------- вид оплаты и тоннаж ---------- */
+function num_(v) { var n = parseFloat(String(v === undefined || v === null ? '' : v).replace(',', '.')); return isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : 0; }
+function tons_(p) { var t = (p && p.loads || []).reduce(function (s, l) { return s + num_(l.tons); }, 0); return Math.round((t || Number(p && p.tons || 0)) * 100) / 100; }
+function payKey_(x) { return x && (x.pay === 'trip' || x.pay === 'ton') ? x.pay : 'hour'; }
+function payName_(x) { return { hour: 'Почасовая', trip: 'Порейсовая', ton: 'За тоннаж' }[payKey_(x)]; }

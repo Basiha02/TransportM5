@@ -436,24 +436,28 @@ function useUpdater() {
 function isDemo() { try { return typeof window !== "undefined" && window.__M5_DEMO__ === true; } catch { return false; } }
 
 /* --- демо-режим (только для предпросмотра, база не затрагивается) --- */
-const DEMO_KEY = "m5_demo_rows_v4";
+const DEMO_KEY = "m5_demo_rows_v5";
 let demoRows = null;
 function demoSeed() {
   const t = todayStr(), y = addDays(t, -1), tm = addDays(t, 1);
   const rows = {};
   const authors = [14, 1, 13, 12, 16];
   let n = 0;
-  const add = (date, driverId, machineId, time, place, org, note, rep) => {
+  const add = (date, driverId, machineId, time, place, org, note, rep, pay) => {
     const id = "req_demo" + newId();
-    rows[id] = { date, month: monthOf(date), driverId, machineId, time, place, org, note, createdBy: authors[n++ % authors.length], createdAt: new Date().toISOString() };
+    rows[id] = { date, month: monthOf(date), driverId, machineId, time, place, org, note, pay: pay || "hour", createdBy: authors[n++ % authors.length], createdAt: new Date().toISOString() };
     if (rep) rows["rep_" + id] = { reqId: id, date, month: monthOf(date), driverId, machineId, ...rep, hours: calcHours(rep.from, rep.to), done: true, savedBy: driverId, savedAt: new Date().toISOString() };
   };
   add(y, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40", { from: "08:00", to: "17:30", trips: 6, route: "Карьер → Линейная", comment: "", waybill: true });
   add(y, 6, 14, "09:00", "ул. Каслинская, 5", "ИП Петров", "Разгрузка плит", null);
-  add(t, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40", { from: "08:00", to: "16:00", trips: 5, route: "Карьер → Линейная", comment: "", waybill: true });
+  add(t, 3, 1, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Щебень 20-40, оплата за тоннаж", { from: "08:00", to: "16:00", trips: 3, route: "Карьер → Линейная", comment: "", waybill: true,
+    pay: "ton", loads: [{ material: "Щебень 20-40", tons: 30 }, { material: "Щебень 20-40", tons: 29.5 }, { material: "Скала", tons: 31 }], tons: 90.5 }, "ton");
   add(t, 4, 8, "09:00", "Склад, Свердловский тракт, 12", "ООО «УралСнаб»", "Кран на 4 часа", null);
   add(t, 5, 10, "07:30", "п. Терема", "ИП Колдаева", "", null);
-  add(tm, 3, 2, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "", null);
+  add(tm, 3, 2, "08:00", "Карьер — ул. Линейная, 98", "ООО «СтройМонтаж»", "Оплата за тоннаж — пишите тонны по каждому рейсу", null, "ton");
+  add(t, 6, 2, "07:30", "Карьер Шершни — ЖК Ньютон", "ООО «Уралстрой»", "Скала, оплата за тоннаж", null, "ton");
+  add(y, 7, 2, "07:00", "Карьер Шершни — ЖК Ньютон", "ООО «Уралстрой»", "Скала", { from: "07:00", to: "15:00", trips: 2, route: "Шершни → Ньютон", comment: "", waybill: true,
+    pay: "ton", loads: [{ material: "Скала", tons: 32 }, { material: "Скала", tons: 30.4 }], tons: 62.4 }, "ton");
   add(tm, 7, 5, "10:00", "ул. Труда, 160", "ООО «Альфа»", "Манипулятор, 2 точки", null);
   add(addDays(t, 3), 6, 8, "08:30", "ЖК Ньютон", "ООО «СтройМонтаж»", "", null);
   rows.cfg_machines = { repair: {}, extra: [], repairs: [
@@ -784,6 +788,22 @@ const S = {
   muted: { color: C.gray, fontSize: 13 },
 };
 
+/* ---------------- вид оплаты и тоннаж ---------------- */
+const PAY_TYPES = [["hour", "🕐 Почасовая"], ["trip", "🚚 Порейсовая"], ["ton", "⚖️ За тоннаж"]];
+const PAY_NAME = { hour: "Почасовая", trip: "Порейсовая", ton: "За тоннаж" };
+const payOf = x => (x && PAY_NAME[x.pay] ? x.pay : "hour");
+const MATERIALS = ["Щебень 5-20", "Щебень 20-40", "Щебень 40-70", "Скала", "Песок", "ПГС", "Отсев", "Грунт", "Глина", "Асфальтная крошка", "Бой бетона", "Строительный мусор"];
+const numT = v => { const n = parseFloat(String(v ?? "").replace(",", ".").replace(/\s/g, "")); return isFinite(n) && n > 0 ? n : 0; };
+const roundT = n => Math.round(n * 100) / 100;
+const fmtT = n => String(roundT(n)).replace(".", ",");
+const repTons = rep => roundT((rep?.loads || []).reduce((s, l) => s + numT(l.tons), 0) || Number(rep?.tons || 0));
+// «Щебень 20-40: 2 р. / 58 т; Скала: 1 р. / 30 т»
+const loadsByMaterial = loads => {
+  const g = {};
+  (loads || []).forEach(l => { const k = (l.material || "").trim() || "без названия"; const x = g[k] || (g[k] = { material: k, trips: 0, tons: 0 }); x.trips++; x.tons += numT(l.tons); });
+  return Object.values(g).sort((a, b) => b.tons - a.tons);
+};
+
 /* ---------------- мелкие компоненты ---------------- */
 function Field({ label, children }) {
   return <label style={{ display: "block" }}><span style={S.label}>{label}</span>{children}</label>;
@@ -926,7 +946,7 @@ function TimeInput({ value, onChange }) {
 
 /* ---------------- форма заявки ---------------- */
 function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriver, presetMachineId, onSubmit, onCancel, submitLabel }) {
-  const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: presetMachineId || "", time: "08:00", place: "", org: "", note: "" });
+  const [f, setF] = useState(() => initial ? { ...initial } : { date, driverId: lockDriver || "", machineId: presetMachineId || "", time: "08:00", place: "", org: "", note: "", pay: "hour" });
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
   useFormOpen();
@@ -963,6 +983,11 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
         <Field label="Дата">
           <input type="date" style={S.input} value={f.date} onChange={e => e.target.value && set("date", e.target.value)} />
         </Field>
+        <Field label="Оплата">
+          <select style={S.input} value={f.pay || "hour"} onChange={e => set("pay", e.target.value)}>
+            {PAY_TYPES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+        </Field>
       </div>
       <Field label="Куда / объект">
         <MicInput value={f.place} onChange={v => set("place", v)} placeholder="Адрес или название объекта" />
@@ -989,11 +1014,49 @@ function ReqForm({ initial, date, drivers, machines, repairOf, dayReqs, lockDriv
 }
 
 /* ---------------- форма отчёта водителя ---------------- */
+function LoadsEditor({ loads, setLoads }) {
+  const upd = (i, k, v) => setLoads(ls => ls.map((l, j) => j === i ? { ...l, [k]: v } : l));
+  const add = () => setLoads(ls => [...ls, { material: ls.length ? ls[ls.length - 1].material : "", tons: "" }]);
+  const del = i => setLoads(ls => ls.length > 1 ? ls.filter((_, j) => j !== i) : [{ material: "", tons: "" }]);
+  const total = roundT(loads.reduce((s, l) => s + numT(l.tons), 0));
+  const filled = loads.filter(l => numT(l.tons) > 0);
+  const mats = loadsByMaterial(filled);
+  return (
+    <div data-testid="loads-editor" style={{ padding: 10, borderRadius: 10, background: "#fff", border: `1px solid ${C.border}`, display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 700, fontSize: 14, color: C.dark }}>⚖️ Рейсы с тоннажем</div>
+      <datalist id="m5-materials">{MATERIALS.map(m => <option key={m} value={m} />)}</datalist>
+      {loads.map((l, i) => (
+        <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-end" }}>
+          <div style={{ flex: "0 0 auto", width: 30, paddingBottom: 11, fontWeight: 700, color: C.gray, fontSize: 14 }}>{i + 1}.</div>
+          <label style={{ flex: "1 1 auto", minWidth: 0 }}>
+            {i === 0 && <span style={S.label}>Что вёз</span>}
+            <input list="m5-materials" style={S.input} value={l.material} onChange={e => upd(i, "material", e.target.value)} placeholder="Щебень, скала…" />
+          </label>
+          <label style={{ flex: "0 0 92px" }}>
+            {i === 0 && <span style={S.label}>Тонн</span>}
+            <input type="text" inputMode="decimal" style={S.input} value={l.tons} onChange={e => upd(i, "tons", e.target.value.replace(/[^\d.,]/g, ""))} placeholder="30" />
+          </label>
+          <button type="button" style={S.ghost({ color: C.red, padding: "10px 11px", flex: "0 0 auto" })} onClick={() => del(i)} aria-label={`Убрать рейс ${i + 1}`}>✕</button>
+        </div>
+      ))}
+      <button type="button" style={S.ghost({ padding: "10px 12px", fontSize: 14, border: `1px dashed ${C.blue}` })} onClick={add}>➕ Ещё рейс</button>
+      <div style={{ fontSize: 14, color: C.dark }}>
+        Итого: <b>{filled.length} рейс.</b> · <b>{fmtT(total)} т</b>
+        {mats.length > 1 && <div style={{ ...S.muted, marginTop: 2 }}>{mats.map(m => `${m.material}: ${m.trips} р. / ${fmtT(m.tons)} т`).join(" · ")}</div>}
+      </div>
+    </div>
+  );
+}
+
 function ReportForm({ req, rep, onSubmit, onCancel }) {
   const [f, setF] = useState(() => ({
     from: rep?.from || req.time || "", to: rep?.to || "", trips: rep?.trips ?? "",
     route: rep?.route || "", comment: rep?.comment || "", waybill: rep ? !!rep.waybill : false,
+    pay: rep ? payOf(rep) : payOf(req),
   }));
+  const [loads, setLoads] = useState(() => rep?.loads?.length
+    ? rep.loads.map(l => ({ material: l.material || "", tons: String(l.tons ?? "").replace(".", ",") }))
+    : [{ material: "", tons: "" }]);
   const [s, run] = useSaver();
   const [err, setErr] = useState("");
   useFormOpen();
@@ -1002,19 +1065,41 @@ function ReportForm({ req, rep, onSubmit, onCancel }) {
 
   const submit = async () => {
     if (!f.from || !f.to) return setErr("Укажите время работы: с какого и до какого часа");
+    let trips = f.trips === "" ? 0 : Number(f.trips), clean = [], tons = 0;
+    if (f.pay === "trip" && !(trips > 0)) return setErr("Оплата порейсовая — укажите, сколько сделали рейсов");
+    if (f.pay === "ton") {
+      const bad = loads.findIndex(l => l.material.trim() && !numT(l.tons));
+      if (bad >= 0) return setErr(`Рейс ${bad + 1}: укажите, сколько тонн`);
+      clean = loads.filter(l => numT(l.tons) > 0).map(l => ({ material: l.material.trim(), tons: roundT(numT(l.tons)) }));
+      if (!clean.length) return setErr("Оплата за тоннаж — внесите хотя бы один рейс и его тоннаж");
+      trips = clean.length;
+      tons = roundT(clean.reduce((sum, l) => sum + l.tons, 0));
+    }
     setErr("");
-    await run(() => onSubmit({ ...f, trips: f.trips === "" ? 0 : Number(f.trips), hours, route: f.route.trim(), comment: f.comment.trim() }));
+    await run(() => onSubmit({ ...f, trips, loads: clean, tons, hours, route: f.route.trim(), comment: f.comment.trim() }));
   };
 
   return (
     <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: "#f7fbf8", border: `1px solid ${C.greenBorder}`, display: "grid", gap: 10 }}>
       <div style={{ fontWeight: 700, color: C.green }}>📝 Отчёт о выполненной работе</div>
+      <div>
+        <span style={S.label}>Оплата</span>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {PAY_TYPES.map(([k, l]) => (
+            <button key={k} type="button" data-testid={"pay-" + k} onClick={() => set("pay", k)}
+              style={f.pay === k ? S.btn(C.dark, { flex: "1 1 100px", padding: "9px 8px", fontSize: 14 }) : S.ghost({ flex: "1 1 100px", padding: "9px 8px", fontSize: 14 })}>{l}</button>
+          ))}
+        </div>
+      </div>
       <div style={S.grid2}>
         <Field label="Работал с *"><input type="time" style={S.input} value={f.from} onChange={e => set("from", e.target.value)} /></Field>
         <Field label="до *"><input type="time" style={S.input} value={f.to} onChange={e => set("to", e.target.value)} /></Field>
-        <Field label="Рейсов"><input type="number" inputMode="numeric" min="0" style={S.input} value={f.trips} onChange={e => set("trips", e.target.value)} placeholder="0" /></Field>
+        {f.pay !== "ton" && (
+          <Field label={f.pay === "trip" ? "Рейсов *" : "Рейсов"}><input type="number" inputMode="numeric" min="0" style={S.input} value={f.trips} onChange={e => set("trips", e.target.value)} placeholder="0" /></Field>
+        )}
       </div>
       {hours > 0 && <div style={{ fontSize: 14, color: C.dark }}>Итого: <b>{hours} ч</b></div>}
+      {f.pay === "ton" && <LoadsEditor loads={loads} setLoads={setLoads} />}
       <Field label="Маршрут / что делал">
         <MicInput value={f.route} onChange={v => set("route", v)} placeholder="Например: Карьер → ул. Линейная" />
       </Field>
@@ -1072,6 +1157,7 @@ function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPl
             {req.time ? <span style={{ color: C.dark }}>🕗 {req.time} · </span> : null}{userName(req.driverId)}
           </div>
           <div style={{ fontSize: 14, marginTop: 4, color: "#33414f" }}>🚜 {machine ? machine.name : "без техники"}</div>
+          {payOf(req) !== "hour" && <div style={{ fontSize: 13, marginTop: 2, color: C.orange, fontWeight: 600 }}>💰 Оплата: {PAY_NAME[payOf(req)].toLowerCase()}</div>}
         </div>
         <span style={{ ...S.tag(done ? C.green : missing ? C.orangeBg : C.blueBg, done ? "#fff" : missing ? C.orange : C.blue), marginTop: 0, whiteSpace: "nowrap", fontWeight: 700 }}>
           {done ? "✅ Отработано" : missing ? "⚠️ Нет отчёта" : "⏳ В плане"}
@@ -1096,7 +1182,14 @@ function ReqCard({ req, rep, machines, repairOf, drivers, dayReqs, me, canEditPl
       {done && mode !== "report" && (
         <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.greenBorder}` }}>
           <span style={S.tag("#fff", C.dark)}>🕐 {rep.from}–{rep.to} · <b>{rep.hours} ч</b></span>
+          {payOf(rep) !== "hour" && <span style={S.tag(C.purpleBg, C.purple)}>💰 {PAY_NAME[payOf(rep)]}</span>}
           {Number(rep.trips) > 0 && <span style={S.tag(C.orangeBg, C.orange)}>🚗 {rep.trips} рейс.</span>}
+          {repTons(rep) > 0 && <span style={S.tag(C.orangeBg, C.orange)}>⚖️ <b>{fmtT(repTons(rep))} т</b></span>}
+          {(rep.loads || []).length > 0 && (
+            <div data-testid="loads" style={{ marginTop: 6, fontSize: 13, color: "#33414f", lineHeight: 1.55 }}>
+              {rep.loads.map((l, i) => <div key={i}>Рейс {i + 1}: {l.material || "—"} — <b>{fmtT(numT(l.tons))} т</b></div>)}
+            </div>
+          )}
           {rep.route && <span style={S.tag(C.blueBg, C.blue)}>🛣 {rep.route}</span>}
           <span style={S.tag(rep.waybill ? "#fff" : C.redBg, rep.waybill ? C.green : C.red)}>{rep.waybill ? "📄 Путевой закрыт" : "📄 Путевой НЕ закрыт"}</span>
           {rep.comment && <div style={{ fontSize: 13, color: C.gray, marginTop: 6 }}>💬 {rep.comment}</div>}
@@ -1163,7 +1256,7 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
     const data = {
       date: f.date || date, month: monthOf(f.date || date),
       driverId: f.driverId, machineId: f.machineId, time: f.time || "",
-      place: f.place, org: f.org, note: f.note,
+      place: f.place, org: f.org, note: f.note, pay: payOf(f),
       createdBy: old ? old.createdBy : me.id, createdAt: old ? old.createdAt : new Date().toISOString(),
       updatedBy: me.id, updatedAt: new Date().toISOString(),
       driverName: userName(f.driverId), createdByName: old ? (old.createdByName || userName(old.createdBy)) : me.name, updatedByName: me.name,
@@ -1197,6 +1290,7 @@ function PlanView({ me, machines, repairOf, blockedIds, isDriver, preset }) {
     const data = {
       reqId: req.id, date: req.date, month: monthOf(req.date), driverId: Number(req.driverId), machineId: req.machineId,
       from: f.from, to: f.to, hours: f.hours, trips: f.trips, route: f.route, comment: f.comment, waybill: !!f.waybill,
+      pay: payOf(f), loads: f.loads || [], tons: f.tons || 0,
       done: true, savedBy: me.id, savedAt: new Date().toISOString(),
       driverName: userName(req.driverId), savedByName: me.name,
     };
@@ -1305,6 +1399,7 @@ function ReportView({ machines, repairOf }) {
   const missing = rows.filter(x => !x.rep?.done && x.req.date < t);
   const totalHours = Math.round(done.reduce((s, x) => s + Number(x.rep.hours || 0), 0) * 10) / 10;
   const totalTrips = done.reduce((s, x) => s + Number(x.rep.trips || 0), 0);
+  const totalTons = roundT(done.reduce((s, x) => s + repTons(x.rep), 0));
   const mName = id => (machines.find(m => m.id === Number(id)) || {}).name || "без техники";
 
   const groupBy = (keyFn) => {
@@ -1318,6 +1413,7 @@ function ReportView({ machines, repairOf }) {
         shifts: d.length,
         hours: Math.round(d.reduce((s, x) => s + Number(x.rep.hours || 0), 0) * 10) / 10,
         trips: d.reduce((s, x) => s + Number(x.rep.trips || 0), 0),
+        tons: roundT(d.reduce((s, x) => s + repTons(x.rep), 0)),
         missing: items.filter(x => !x.rep?.done && x.req.date < t).length,
         noWaybill: d.filter(x => !x.rep.waybill).length,
       };
@@ -1335,15 +1431,17 @@ function ReportView({ machines, repairOf }) {
     pastDays.forEach(d => { if (busy.has(d)) work++; else if (repairOf(mid, d)) rep++; else idle++; });
     return { work, rep, idle };
   };
-  let groups;
-  if (mode === "drivers") {
+  let groups = [];
+  if (mode === "trips") {
+    // отдельная вкладка «Рейсы» — считается ниже
+  } else if (mode === "drivers") {
     groups = groupBy(x => String(x.req.driverId)).map(g => ({ ...g, title: userName(g.key) }));
   } else {
     const byKey = {};
     groupBy(x => String(x.req.machineId || 0)).forEach(g => { byKey[g.key] = g; });
     // вся техника, даже без единой заявки за месяц — чтобы был виден простой
     groups = machines.map(m => {
-      const g = byKey[String(m.id)] || { key: String(m.id), items: [], days: 0, shifts: 0, hours: 0, trips: 0, missing: 0, noWaybill: 0 };
+      const g = byKey[String(m.id)] || { key: String(m.id), items: [], days: 0, shifts: 0, hours: 0, trips: 0, tons: 0, missing: 0, noWaybill: 0 };
       return { ...g, title: m.name, md: machineDays(m.id) };
     });
     if (byKey["0"]) groups.push({ ...byKey["0"], title: "Без техники" });
@@ -1352,20 +1450,54 @@ function ReportView({ machines, repairOf }) {
 
   const csvCell = v => { const s = v === undefined || v === null ? "" : String(v); return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const downloadCsv = () => {
-    const head = ["Дата", "Водитель", "Техника", "Время подачи", "Объект", "Заказчик", "Заявку внёс", "Статус", "С", "До", "Часы", "Рейсы", "Маршрут", "Путевой закрыт", "Комментарий водителя"];
+    const head = ["Дата", "Водитель", "Техника", "Время подачи", "Объект", "Заказчик", "Заявку внёс", "Статус", "С", "До", "Часы", "Рейсы", "Маршрут", "Путевой закрыт", "Комментарий водителя", "Оплата", "Тонн", "Рейсы с тоннажем"];
     const lines = rows.map(({ req, rep }) => [
       fmtDate(req.date), userName(req.driverId), mName(req.machineId), req.time, req.place, req.org, req.createdBy ? userName(req.createdBy) : "",
       rep?.done ? "Отработано" : req.date < t ? "Нет отчёта" : "В плане",
       rep?.from, rep?.to, rep?.hours ? String(rep.hours).replace(".", ",") : "", rep?.trips, rep?.route,
       rep?.done ? (rep.waybill ? "да" : "нет") : "", rep?.comment,
+      rep?.done ? PAY_NAME[payOf(rep)] : PAY_NAME[payOf(req)], rep?.done && repTons(rep) ? fmtT(repTons(rep)) : "",
+      rep?.done ? (rep.loads || []).map((l, i) => `${i + 1}) ${l.material || "—"} ${fmtT(numT(l.tons))} т`).join("; ") : "",
     ].map(csvCell).join(";"));
+    saveCsv(head, lines, `Отчёт_М5_${MONTHS[month - 1]}_${year}.csv`);
+  };
+  const saveCsv = (head, lines, name) => {
     const csv = "﻿" + [head.join(";"), ...lines].join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `Отчёт_М5_${MONTHS[month - 1]}_${year}.csv`;
+    a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
+
+  /* --- вкладка «Рейсы»: смены с порейсовой оплатой / тоннажем / рейсами --- */
+  const [tripDriver, setTripDriver] = useState("");
+  const [tripOrg, setTripOrg] = useState("");
+  const tripAll = done.filter(x => payOf(x.rep) !== "hour" || Number(x.rep.trips) > 0 || repTons(x.rep) > 0);
+  const tripDrivers = [...new Set(tripAll.map(x => String(x.req.driverId)))].sort((a, b) => userName(a).localeCompare(userName(b), "ru"));
+  const tripOrgs = [...new Set(tripAll.map(x => (x.req.org || "").trim() || "без заказчика"))].sort((a, b) => a.localeCompare(b, "ru"));
+  const tripShifts = tripAll.filter(x => (!tripDriver || String(x.req.driverId) === tripDriver) && (!tripOrg || ((x.req.org || "").trim() || "без заказчика") === tripOrg));
+  const tripCount = tripShifts.reduce((s, x) => s + Number(x.rep.trips || 0), 0);
+  const tripTons = roundT(tripShifts.reduce((s, x) => s + repTons(x.rep), 0));
+  const tripMats = loadsByMaterial(tripShifts.flatMap(x => x.rep.loads || []));
+  const tripByOrg = Object.values(tripShifts.reduce((g, x) => {
+    const k = (x.req.org || "").trim() || "без заказчика";
+    const o = g[k] || (g[k] = { org: k, trips: 0, tons: 0 });
+    o.trips += Number(x.rep.trips || 0); o.tons += repTons(x.rep);
+    return g;
+  }, {})).sort((a, b) => b.tons - a.tons || b.trips - a.trips);
+  const downloadTripsCsv = () => {
+    const head = ["Дата", "Водитель", "Техника", "Заказчик", "Объект", "Оплата", "Рейс №", "Что вёз", "Тонн", "Маршрут", "Путевой закрыт"];
+    const lines = [];
+    tripShifts.forEach(({ req, rep }) => {
+      const base = [fmtDate(req.date), userName(req.driverId), mName(req.machineId), req.org, req.place, PAY_NAME[payOf(rep)]];
+      const tail = [rep.route, rep.waybill ? "да" : "нет"];
+      if ((rep.loads || []).length) rep.loads.forEach((l, i) => lines.push([...base, i + 1, l.material, fmtT(numT(l.tons)), ...tail].map(csvCell).join(";")));
+      else lines.push([...base, `${Number(rep.trips || 0)} рейс.`, "", "", ...tail].map(csvCell).join(";"));
+    });
+    lines.push(["Итого", "", "", "", "", "", `${tripCount} рейс.`, "", fmtT(tripTons), "", ""].map(csvCell).join(";"));
+    saveCsv(head, lines, `Рейсы_М5_${MONTHS[month - 1]}_${year}.csv`);
   };
 
   return (
@@ -1382,20 +1514,81 @@ function ReportView({ machines, repairOf }) {
 
       {data.error && <div style={{ ...S.card, background: C.redBg, color: C.red, fontSize: 14 }}>⚠️ {data.error}</div>}
 
-      <div style={{ ...S.card, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", textAlign: "center", padding: 10, gap: 4 }}>
+      <div style={{ ...S.card, display: "grid", gridTemplateColumns: `repeat(${totalTons > 0 ? 5 : 4}, 1fr)`, textAlign: "center", padding: 10, gap: 4 }}>
         <div><div style={{ fontSize: 20, fontWeight: 800, color: C.green }}>{done.length}</div><div style={S.muted}>смен</div></div>
         <div><div style={{ fontSize: 20, fontWeight: 800, color: C.blue }}>{totalHours}</div><div style={S.muted}>часов</div></div>
         <div><div style={{ fontSize: 20, fontWeight: 800, color: C.orange }}>{totalTrips}</div><div style={S.muted}>рейсов</div></div>
+        {totalTons > 0 && <div><div style={{ fontSize: 20, fontWeight: 800, color: C.purple }}>{fmtT(totalTons)}</div><div style={S.muted}>тонн</div></div>}
         <div><div style={{ fontSize: 20, fontWeight: 800, color: missing.length ? C.red : C.gray }}>{missing.length}</div><div style={S.muted}>без отчёта</div></div>
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        {[["drivers", "👤 По водителям"], ["machines", "🚜 По технике"]].map(([k, l]) => (
-          <button key={k} style={mode === k ? S.btn(C.dark, { flex: 1, fontSize: 14, padding: "9px" }) : S.ghost({ flex: 1, fontSize: 14 })} onClick={() => setMode(k)}>{l}</button>
+        {[["drivers", "👤 Водители"], ["machines", "🚜 Техника"], ["trips", "🚚 Рейсы"]].map(([k, l]) => (
+          <button key={k} data-testid={"rmode-" + k} style={mode === k ? S.btn(C.dark, { flex: 1, fontSize: 14, padding: "9px 4px" }) : S.ghost({ flex: 1, fontSize: 14, padding: "8px 4px" })} onClick={() => setMode(k)}>{l}</button>
         ))}
       </div>
 
-      {data.loading && data.key !== ym ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div>
+      {mode === "trips" && !(data.loading && data.key !== ym) && (
+        <div data-testid="trips-report">
+          <div style={{ ...S.card, display: "grid", gap: 8 }}>
+            <div style={S.grid2}>
+              <select style={S.input} value={tripDriver} onChange={e => setTripDriver(e.target.value)}>
+                <option value="">Все водители</option>
+                {tripDrivers.map(id => <option key={id} value={id}>{userName(id)}</option>)}
+              </select>
+              <select style={S.input} value={tripOrg} onChange={e => setTripOrg(e.target.value)}>
+                <option value="">Все заказчики</option>
+                {tripOrgs.map(o => <option key={o} value={o}>{o}</option>)}
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 15 }}>Смен: <b>{tripShifts.length}</b> · рейсов: <b>{tripCount}</b>{tripTons > 0 && <> · <b style={{ color: C.purple }}>{fmtT(tripTons)} т</b></>}</div>
+              <button style={S.btn(C.green, { fontSize: 14, padding: "9px 14px" })} onClick={downloadTripsCsv} disabled={!tripShifts.length}>⬇️ Рейсы в Excel</button>
+            </div>
+          </div>
+          {tripShifts.length === 0 ? (
+            <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>За {MONTHS[month - 1].toLowerCase()} рейсов нет. Рейсы появятся, когда водитель в отчёте выберет «Порейсовая» или «За тоннаж».</div>
+          ) : (
+            <>
+              {tripMats.length > 0 && (
+                <div style={S.card}>
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>⚖️ По материалам</div>
+                  {tripMats.map(m => (
+                    <div key={m.material} style={{ display: "flex", justifyContent: "space-between", padding: "5px 0", borderTop: `1px solid ${C.border}`, fontSize: 14 }}>
+                      <span>{m.material}</span><span>{m.trips} рейс. · <b>{fmtT(m.tons)} т</b></span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {tripByOrg.length > 1 && (
+                <div style={S.card}>
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>🏢 По заказчикам</div>
+                  {tripByOrg.map(o => (
+                    <div key={o.org} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "5px 0", borderTop: `1px solid ${C.border}`, fontSize: 14 }}>
+                      <span>{o.org}</span><span style={{ whiteSpace: "nowrap" }}>{o.trips} рейс.{o.tons > 0 && <> · <b>{fmtT(o.tons)} т</b></>}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={S.card}>
+                <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>📋 По сменам</div>
+                {tripShifts.map(({ req, rep }) => (
+                  <div key={req.id} style={{ padding: "8px 0", borderTop: `1px solid ${C.border}`, fontSize: 13.5, lineHeight: 1.5 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                      <span><b>{fmtDate(req.date)}</b> · {shortName(req.driverId)} · {mName(req.machineId)}</span>
+                      <span style={{ whiteSpace: "nowrap", fontWeight: 700 }}>{rep.trips} рейс.{repTons(rep) > 0 ? ` · ${fmtT(repTons(rep))} т` : ""}</span>
+                    </div>
+                    <div style={{ color: "#33414f" }}>{[req.org, req.place].filter(Boolean).join(" · ")} · <span style={{ color: C.purple }}>{PAY_NAME[payOf(rep)].toLowerCase()}</span></div>
+                    {(rep.loads || []).map((l, i) => <div key={i} style={{ color: C.gray, paddingLeft: 10 }}>{i + 1}. {l.material || "—"} — {fmtT(numT(l.tons))} т</div>)}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {mode === "trips" ? null : data.loading && data.key !== ym ? <div style={{ ...S.card, textAlign: "center", color: C.gray }}>⏳ Загружаем…</div>
         : groups.length === 0 || (mode === "drivers" && !rows.length) ? <div style={{ ...S.card, textAlign: "center", color: C.gray, padding: 24 }}>За {MONTHS[month - 1].toLowerCase()} записей нет</div>
         : groups.map(g => (
           <div key={g.key} style={S.card}>
@@ -1408,6 +1601,7 @@ function ReportView({ machines, repairOf }) {
                 <span style={S.tag(C.greenBg, C.green)}>{g.days} дн. / {g.shifts} смен</span>
                 <span style={S.tag(C.blueBg, C.blue)}>{g.hours} ч</span>
                 <span style={S.tag(C.orangeBg, C.orange)}>{g.trips} рейс.</span>
+                {g.tons > 0 && <span style={S.tag(C.purpleBg, C.purple)}>⚖️ {fmtT(g.tons)} т</span>}
                 {g.missing > 0 && <span style={S.tag(C.redBg, C.red)}>⚠️ без отчёта: {g.missing}</span>}
                 {g.noWaybill > 0 && <span style={S.tag(C.redBg, C.red)}>📄 путевой не закрыт: {g.noWaybill}</span>}
                 {g.md && pastDays.length > 0 && (
@@ -1426,7 +1620,8 @@ function ReportView({ machines, repairOf }) {
                     <div style={{ color: "#33414f" }}>{[req.place, req.org].filter(Boolean).join(" · ")}</div>
                     {req.createdBy && <div style={{ color: C.purple, fontSize: 12.5 }}>внёс(ла): {shortName(req.createdBy)}</div>}
                     {rep?.done
-                      ? <div style={{ color: C.green }}>✅ {rep.from}–{rep.to} ({rep.hours} ч){Number(rep.trips) ? `, ${rep.trips} рейс.` : ""}{rep.route ? `, ${rep.route}` : ""}{rep.waybill ? "" : " · путевой не закрыт"}</div>
+                      ? <div style={{ color: C.green }}>✅ {rep.from}–{rep.to} ({rep.hours} ч){Number(rep.trips) ? `, ${rep.trips} рейс.` : ""}{repTons(rep) ? `, ${fmtT(repTons(rep))} т` : ""}{rep.route ? `, ${rep.route}` : ""}{rep.waybill ? "" : " · путевой не закрыт"}
+                        {(rep.loads || []).length > 0 && <div style={{ color: C.gray, fontSize: 12.5 }}>{loadsByMaterial(rep.loads).map(m => `${m.material}: ${m.trips} р. / ${fmtT(m.tons)} т`).join(" · ")}</div>}</div>
                       : <div style={{ color: req.date < t ? C.red : C.gray }}>{req.date < t ? "⚠️ отчёт не заполнен" : "⏳ в плане"}</div>}
                   </div>
                 ))}
